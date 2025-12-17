@@ -2,8 +2,7 @@
 
 use starknet::ContractAddress;
 use snforge_std::{
-    declare, ContractClassTrait, DeclareResultTrait,
-    start_cheat_caller_address, stop_cheat_caller_address
+    declare, ContractClassTrait, DeclareResultTrait
 };
 use core::array::ArrayTrait;
 use core::integer::u128;

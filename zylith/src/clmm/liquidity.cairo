@@ -1,8 +1,6 @@
 // Liquidity Management - Calculate and update liquidity
 // Based on Uniswap v3 / Ekubo formulas
 
-use super::math;
-
 /// Calculate liquidity for a given range (token0)
 /// Formula: L = amount0 * (sqrt(P_b) * sqrt(P_a)) / (sqrt(P_b) - sqrt(P_a))
 /// Where P_a and P_b are sqrt prices at tick boundaries
@@ -21,19 +19,22 @@ pub fn get_liquidity_for_amount0(
     
     // Calculate: amount0 * (sqrt(P_b) * sqrt(P_a)) / (sqrt(P_b) - sqrt(P_a))
     // In Q64.96 format
-    
+
     let sqrt_price_diff = price_upper - price_lower;
     assert(sqrt_price_diff > 0, 'Price diff must be positive');
-    
-    // numerator = amount0 * sqrt(P_b) * sqrt(P_a)
-    let numerator = math::mul_u128(amount0, price_upper);
-    let numerator = math::mul_u128(numerator, price_lower);
-    
-    // result = numerator / sqrt_price_diff
-    // But we need to account for Q64.96 format
-    let result = numerator / sqrt_price_diff;
-    
-    result
+
+    // numerator = amount0 * sqrt(P_b) * sqrt(P_a) / Q96
+    // Use u256 to prevent overflow
+    let amount0_u256: u256 = amount0.try_into().unwrap();
+    let price_upper_u256: u256 = price_upper.try_into().unwrap();
+    let price_lower_u256: u256 = price_lower.try_into().unwrap();
+    let sqrt_price_diff_u256: u256 = sqrt_price_diff.try_into().unwrap();
+    let q96_u256: u256 = 79228162514264337593543950336_u128.try_into().unwrap();
+
+    let numerator = (amount0_u256 * price_upper_u256 * price_lower_u256) / q96_u256;
+    let result = numerator / sqrt_price_diff_u256;
+
+    result.try_into().unwrap()
 }
 
 /// Calculate liquidity for a given range (token1)
@@ -54,12 +55,17 @@ pub fn get_liquidity_for_amount1(
     // Calculate: amount1 / (sqrt(P_b) - sqrt(P_a))
     let sqrt_price_diff = price_upper - price_lower;
     assert(sqrt_price_diff > 0, 'Price diff must be positive');
-    
+
     // In Q64.96 format: result = (amount1 * 2^96) / sqrt_price_diff
-    let numerator = math::mul_u128(amount1, 79228162514264337593543950336); // Q96
-    let result = numerator / sqrt_price_diff;
-    
-    result
+    // Use u256 to prevent overflow
+    let amount1_u256: u256 = amount1.try_into().unwrap();
+    let sqrt_price_diff_u256: u256 = sqrt_price_diff.try_into().unwrap();
+    let q96_u256: u256 = 79228162514264337593543950336_u128.try_into().unwrap();
+
+    let numerator = amount1_u256 * q96_u256;
+    let result = numerator / sqrt_price_diff_u256;
+
+    result.try_into().unwrap()
 }
 
 /// Calculate amount0 from liquidity
@@ -79,18 +85,19 @@ pub fn get_amount0_for_liquidity(
     
     // Formula: amount0 = L * (sqrt(P_b) - sqrt(P_a)) / (sqrt(P_b) * sqrt(P_a))
     let sqrt_price_diff = price_upper - price_lower;
-    let numerator = math::mul_u128(liquidity, sqrt_price_diff);
-    
-    let denominator = math::mul_u128(price_upper, price_lower);
-    assert(denominator > 0, 'Denominator must be positive');
-    
-    // Account for Q64.96 format
+
     // Use u256 to prevent overflow
+    let liquidity_u256: u256 = liquidity.try_into().unwrap();
+    let sqrt_price_diff_u256: u256 = sqrt_price_diff.try_into().unwrap();
+    let price_upper_u256: u256 = price_upper.try_into().unwrap();
+    let price_lower_u256: u256 = price_lower.try_into().unwrap();
     let q96_u256: u256 = 79228162514264337593543950336_u128.try_into().unwrap();
-    let numerator_u256: u256 = numerator.try_into().unwrap();
-    let scaled_numerator = numerator_u256 * q96_u256;
-    let denominator_u256: u256 = denominator.try_into().unwrap();
-    let result_u256 = scaled_numerator / denominator_u256;
+
+    let numerator = liquidity_u256 * sqrt_price_diff_u256 * q96_u256;
+    let denominator = price_upper_u256 * price_lower_u256;
+    assert(denominator > 0, 'Denominator must be positive');
+
+    let result_u256 = numerator / denominator;
     result_u256.try_into().unwrap()
 }
 
@@ -114,12 +121,16 @@ pub fn get_amount1_for_liquidity(
     
     // Formula: amount1 = L * (sqrt(P_b) - sqrt(P_a)) / 2^96
     let sqrt_price_diff = price_upper - price_lower;
-    let numerator = math::mul_u128(liquidity, sqrt_price_diff);
-    
-    // Divide by Q96 to get amount1
-    let result = numerator / 79228162514264337593543950336;
-    
-    result
+
+    // Use u256 to prevent overflow
+    let liquidity_u256: u256 = liquidity.try_into().unwrap();
+    let sqrt_price_diff_u256: u256 = sqrt_price_diff.try_into().unwrap();
+    let q96_u256: u256 = 79228162514264337593543950336_u128.try_into().unwrap();
+
+    let numerator = liquidity_u256 * sqrt_price_diff_u256;
+    let result = numerator / q96_u256;
+
+    result.try_into().unwrap()
 }
 
 /// Update liquidity at a tick (helper function)

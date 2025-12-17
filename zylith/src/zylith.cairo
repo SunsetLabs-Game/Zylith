@@ -274,15 +274,15 @@ pub mod Zylith {
             // Calculate liquidity needed based on position relative to current price
             // Ensure we always get positive liquidity when amount > 0
             let liquidity_needed = if current_tick < tick_lower {
-                // Current price below range - only need token0
-                liquidity::get_liquidity_for_amount0(
+                // Current price below range - only need token1 (range is above price)
+                liquidity::get_liquidity_for_amount1(
                     sqrt_price_lower_final,
                     sqrt_price_upper_final,
                     amount,
                 )
             } else if current_tick >= tick_upper {
-                // Current price above range - only need token1
-                liquidity::get_liquidity_for_amount1(
+                // Current price above range - only need token0 (range is below price)
+                liquidity::get_liquidity_for_amount0(
                     sqrt_price_lower_final,
                     sqrt_price_upper_final,
                     amount,
@@ -343,49 +343,36 @@ pub mod Zylith {
                 liquidity_needed
             };
             
-            // Calculate actual amounts needed
-            let amount0 = liquidity::get_amount0_for_liquidity(
-                sqrt_price_lower_final,
-                sqrt_price_upper_final,
-                liquidity_needed,
-            );
-            let amount1 = liquidity::get_amount1_for_liquidity(
-                sqrt_price_lower_final,
-                sqrt_price_upper_final,
-                liquidity_needed,
-            );
-            
-            // If both amounts are 0 but we have liquidity, ensure at least one is > 0
-            // This handles edge cases where the calculation precision results in 0
-            let (amount0_final, amount1_final) = if amount0 == 0 && amount1 == 0 && liquidity_needed > 0 {
-                // If current price is in range, distribute based on position
-                if current_tick >= tick_lower && current_tick < tick_upper {
-                    // In range: need both tokens, use amount as base
-                    (amount, amount)
-                } else if current_tick < tick_lower {
-                    // Below range: only token0
-                    (amount, 0)
-                } else {
-                    // Above range: only token1
-                    (0, amount)
-                }
-            } else if amount0 == 0 && amount1 == 0 {
-                // If liquidity is also 0, return 0 amounts
-                (0, 0)
+            // Calculate actual amounts needed based on where current price is
+            let (amount0_final, amount1_final) = if current_tick < tick_lower {
+                // Current price below range - only need token1
+                let amount1 = liquidity::get_amount1_for_liquidity(
+                    sqrt_price_lower_final,
+                    sqrt_price_upper_final,
+                    liquidity_needed,
+                );
+                (0, amount1)
+            } else if current_tick >= tick_upper {
+                // Current price above range - only need token0
+                let amount0 = liquidity::get_amount0_for_liquidity(
+                    sqrt_price_lower_final,
+                    sqrt_price_upper_final,
+                    liquidity_needed,
+                );
+                (amount0, 0)
             } else {
-                // Ensure at least one amount is > 0 if liquidity > 0
-                if liquidity_needed > 0 && amount0 == 0 && amount1 == 0 {
-                    // Fallback: use the input amount
-                    if current_tick < tick_lower {
-                        (amount, 0)
-                    } else if current_tick >= tick_upper {
-                        (0, amount)
-                    } else {
-                        (amount, amount)
-                    }
-                } else {
-                    (amount0, amount1)
-                }
+                // Current price in range - need both tokens
+                let amount0 = liquidity::get_amount0_for_liquidity(
+                    current_sqrt_price,
+                    sqrt_price_upper_final,
+                    liquidity_needed,
+                );
+                let amount1 = liquidity::get_amount1_for_liquidity(
+                    sqrt_price_lower_final,
+                    current_sqrt_price,
+                    liquidity_needed,
+                );
+                (amount0, amount1)
             };
             
             // Calculate fee growth inside range before updating position
@@ -750,7 +737,35 @@ pub mod Zylith {
                 // Update accumulated amounts
                 amount0 = amount0 + step_amount0;
                 amount1 = amount1 + step_amount1;
-                
+
+                // Calculate amount consumed in this step to decrement remaining
+                let step_consumed_amount = if zero_for_one {
+                    // For zero_for_one, we're spending token0 (input)
+                    let abs_amount0 = if step_amount0 < 0 { -step_amount0 } else { step_amount0 };
+                    let max_safe: i128 = 170141183460469231731687303715884105727;
+                    if abs_amount0 <= max_safe && abs_amount0 > 0 {
+                        let consumed: u128 = abs_amount0.try_into().unwrap();
+                        consumed
+                    } else {
+                        0
+                    }
+                } else {
+                    // For one_for_zero, we're spending token1 (input)
+                    let abs_amount1 = if step_amount1 < 0 { -step_amount1 } else { step_amount1 };
+                    let max_safe: i128 = 170141183460469231731687303715884105727;
+                    if abs_amount1 <= max_safe && abs_amount1 > 0 {
+                        let consumed: u128 = abs_amount1.try_into().unwrap();
+                        consumed
+                    } else {
+                        0
+                    }
+                };
+
+                // Safety check: if no progress is being made, break to avoid infinite loop
+                if step_consumed_amount == 0 && liquidity == 0 {
+                    break;
+                };
+
                 // Update fee growth global (accumulate fees)
                 if liquidity > 0 {
                     let fee_growth0 = self.pool.fee_growth_global0_x128.read();
@@ -841,33 +856,21 @@ pub mod Zylith {
                             liquidity = max_liquidity;
                         };
                     };
-                    
+
                     // Update amount remaining (consume the step)
-                    let step_consumed = if zero_for_one {
-                        let abs_amount1 = if step_amount1 < 0 { -step_amount1 } else { step_amount1 };
-                        let max_safe: i128 = 170141183460469231731687303715884105727; // max i128
-                        if abs_amount1 <= max_safe {
-                            abs_amount1.try_into().unwrap()
-                        } else {
-                            amount_specified_remaining // Use remaining as fallback
-                        }
-                    } else {
-                        let abs_amount0 = if step_amount0 < 0 { -step_amount0 } else { step_amount0 };
-                        let max_safe: i128 = 170141183460469231731687303715884105727; // max i128
-                        if abs_amount0 <= max_safe {
-                            abs_amount0.try_into().unwrap()
-                        } else {
-                            amount_specified_remaining // Use remaining as fallback
-                        }
-                    };
-                    
-                    if step_consumed > amount_specified_remaining {
+                    if step_consumed_amount > amount_specified_remaining {
                         amount_specified_remaining = 0;
                     } else {
-                        amount_specified_remaining = amount_specified_remaining - step_consumed;
+                        amount_specified_remaining = amount_specified_remaining - step_consumed_amount;
                     };
                 } else {
-                    // Partial step, consume remaining amount
+                    // Partial step, we didn't reach the next tick
+                    // Consume remaining amount and exit
+                    if step_consumed_amount > amount_specified_remaining {
+                        amount_specified_remaining = 0;
+                    } else {
+                        amount_specified_remaining = amount_specified_remaining - step_consumed_amount;
+                    };
                     break;
                 };
             };
