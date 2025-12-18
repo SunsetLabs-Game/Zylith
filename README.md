@@ -7,7 +7,7 @@ This repository contains the **Zylith Protocol**, a complete implementation of a
 ## Project Structure
 
 ```
-starknet-bounty/
+Zylith/
 └── zylith/              # Main Zylith protocol implementation
     ├── src/             # Cairo smart contracts
     ├── tests/           # Comprehensive test suite

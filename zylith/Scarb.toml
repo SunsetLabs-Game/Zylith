@@ -9,6 +9,7 @@ edition = "2024_07"
 starknet = "2.11.4"
 alexandria_math = "0.2.0"
 openzeppelin_account = "2.0.0"
+garaga = "1.0.0"
 # garaga = "0.18.2"  # Will be added when verifier is generated
 
 [dev-dependencies]
