@@ -11,8 +11,6 @@ pub trait IZKVerifier<TContractState> {
     fn verify_withdraw_proof(
         ref self: TContractState, full_proof_with_hints: Span<felt252>,
     ) -> bool;
-
-    fn get_verification_count(self: @TContractState) -> u256;
 }
 
 #[starknet::contract]
@@ -33,7 +31,6 @@ pub mod ZKVerifier {
 
     #[storage]
     struct Storage {
-        verification_count: u256,
         membership_verifier: ContractAddress,
         swap_verifier: ContractAddress,
         withdraw_verifier: ContractAddress,
@@ -77,7 +74,6 @@ pub mod ZKVerifier {
         self.membership_verifier.write(membership_verifier);
         self.swap_verifier.write(swap_verifier);
         self.withdraw_verifier.write(withdraw_verifier);
-        self.verification_count.write(0);
     }
 
     #[abi(embed_v0)]
@@ -94,7 +90,6 @@ pub mod ZKVerifier {
             match result {
                 Result::Ok(_public_inputs) => {
                     // if proof is valid !!
-                    self._increment_verification_count();
 
                     self
                         .emit(
@@ -133,8 +128,6 @@ pub mod ZKVerifier {
 
             match result {
                 Result::Ok(_public_inputs) => {
-                    self._increment_verification_count();
-
                     self
                         .emit(
                             ProofVerified {
@@ -169,8 +162,6 @@ pub mod ZKVerifier {
 
             match result {
                 Result::Ok(_public_inputs) => {
-                    self._increment_verification_count();
-
                     self
                         .emit(
                             ProofVerified {
@@ -193,18 +184,6 @@ pub mod ZKVerifier {
                     false
                 },
             }
-        }
-
-        fn get_verification_count(self: @ContractState) -> u256 {
-            self.verification_count.read()
-        }
-    }
-
-    #[generate_trait]
-    impl InternalFunctions of InternalFunctionsTrait {
-        fn _increment_verification_count(ref self: ContractState) {
-            let current_count = self.verification_count.read();
-            self.verification_count.write(current_count + 1);
         }
     }
 }
