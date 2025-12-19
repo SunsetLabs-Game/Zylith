@@ -15,6 +15,20 @@ pub mod Zylith {
     use zylith::privacy::deposit::DepositStorage;
     use zylith::privacy::merkle_tree::MerkleTreeStorage;
 
+    // Import the Groth16 verifiers directly
+    use crate::privacy::verifiers::membership::groth16_verifier::{
+        IGroth16VerifierBN254Dispatcher as IMembershipVerifier,
+        IGroth16VerifierBN254DispatcherTrait as IMembershipVerifierTrait,
+    };
+    use crate::privacy::verifiers::swap::groth16_verifier::{
+        IGroth16VerifierBN254Dispatcher as ISwapVerifier,
+        IGroth16VerifierBN254DispatcherTrait as ISwapVerifierTrait,
+    };
+    use crate::privacy::verifiers::withdraw::groth16_verifier::{
+        IGroth16VerifierBN254Dispatcher as IWithdrawVerifier,
+        IGroth16VerifierBN254DispatcherTrait as IWithdrawVerifierTrait,
+    };
+
     #[storage]
     pub struct Storage {
         // CLMM storage
@@ -29,6 +43,10 @@ pub mod Zylith {
         // Contract state
         owner: ContractAddress,
         initialized: bool,
+        //verifier addresses
+        membership_verifier: ContractAddress,
+        swap_verifier: ContractAddress,
+        withdraw_verifier: ContractAddress,
     }
 
     #[event]
@@ -37,6 +55,8 @@ pub mod Zylith {
         PoolEvent: PoolEvent,
         PrivacyEvent: zylith::privacy::deposit::PrivacyEvent,
         Initialized: Initialized,
+        ProofVerified: ProofVerified,
+        ProofRejected: ProofRejected,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -48,9 +68,32 @@ pub mod Zylith {
         pub sqrt_price_x96: u128,
     }
 
+    #[derive(Drop, starknet::Event)]
+    pub struct ProofVerified {
+        pub proof_type: felt252,
+        pub caller: ContractAddress,
+        pub timestamp: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ProofRejected {
+        pub proof_type: felt252,
+        pub caller: ContractAddress,
+        pub error: felt252,
+    }
+
     #[constructor]
-    fn constructor(ref self: ContractState, owner: ContractAddress) {
+    fn constructor(
+        ref self: ContractState,
+        owner: ContractAddress,
+        membership_verifier: ContractAddress,
+        swap_verifier: ContractAddress,
+        withdraw_verifier: ContractAddress,
+    ) {
         self.owner.write(owner);
+        self.membership_verifier.write(membership_verifier);
+        self.swap_verifier.write(swap_verifier);
+        self.withdraw_verifier.write(withdraw_verifier);
         self.initialized.write(false);
     }
 
@@ -129,8 +172,9 @@ pub mod Zylith {
         ) -> (i128, i128) {
             // Step 1 - Verify ZK proof using Garaga verifier
             // TODO: Uncomment when Garaga verifier is generated
-            // let is_valid = zylith::privacy::verifier::verify(proof, public_inputs);
-            // assert!(is_valid, 'Invalid ZK proof');
+            
+            // let is_valid = self.verify_swap_proof(proof.into());
+            // assert!(is_valid, "Invalid_ZK_Proof");
 
             // Step 2 - Validate Merkle membership from public_inputs
             // Extract commitment, path, root from public_inputs
@@ -186,8 +230,9 @@ pub mod Zylith {
         ) {
             // Step 1 - Verify ZK proof using Garaga verifier
             // TODO: Uncomment when Garaga verifier is generated
-            // let is_valid = zylith::privacy::verifier::verify(proof, public_inputs);
-            // assert!(is_valid, 'Invalid ZK proof');
+            
+            // let is_valid = self.verify_withdraw_proof(proof.into());
+            // assert!(is_valid, "Invalid ZK proof");
 
             // Step 2 - Extract nullifier from public_inputs
             // Expected format: [nullifier, ...other_inputs]
@@ -1205,6 +1250,113 @@ pub mod Zylith {
 
             // Calculate root using the helper function
             zylith::privacy::merkle_tree::calculate_root_from_leaves(leaves)
+        }
+
+        fn verify_membership_proof(
+            ref self: ContractState, full_proof_with_hints: Span<felt252>,
+        ) -> bool {
+            let verifier_address = self.membership_verifier.read();
+            let verifier = IMembershipVerifier { contract_address: verifier_address };
+
+            // calling verifier
+            let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);
+
+            match result {
+                Result::Ok(_public_inputs) => {
+                    // if proof is valid !!
+
+                    self
+                        .emit(
+                            ProofVerified {
+                                proof_type: 'membership',
+                                caller: get_caller_address(),
+                                timestamp: starknet::get_block_timestamp(),
+                            },
+                        );
+
+                    true
+                },
+                Result::Err(error) => {
+                    // if Proof is invalid !
+                    self
+                        .emit(
+                            ProofRejected {
+                                proof_type: 'membership',
+                                caller: get_caller_address(),
+                                error: error,
+                            },
+                        );
+                    false
+                },
+            }
+        }
+
+        fn verify_swap_proof(
+            ref self: ContractState, full_proof_with_hints: Span<felt252>,
+        ) -> bool {
+            let verifier_address = self.swap_verifier.read();
+            let verifier = ISwapVerifier { contract_address: verifier_address };
+
+            let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);
+
+            match result {
+                Result::Ok(_public_inputs) => {
+                    self
+                        .emit(
+                            ProofVerified {
+                                proof_type: 'swap',
+                                caller: get_caller_address(),
+                                timestamp: starknet::get_block_timestamp(),
+                            },
+                        );
+
+                    true
+                },
+                Result::Err(error) => {
+                    self
+                        .emit(
+                            ProofRejected {
+                                proof_type: 'swap', caller: get_caller_address(), error: error,
+                            },
+                        );
+
+                    false
+                },
+            }
+        }
+
+        fn verify_withdraw_proof(
+            ref self: ContractState, full_proof_with_hints: Span<felt252>,
+        ) -> bool {
+            let verifier_address = self.withdraw_verifier.read();
+            let verifier = IWithdrawVerifier { contract_address: verifier_address };
+
+            let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);
+
+            match result {
+                Result::Ok(_public_inputs) => {
+                    self
+                        .emit(
+                            ProofVerified {
+                                proof_type: 'withdraw',
+                                caller: get_caller_address(),
+                                timestamp: starknet::get_block_timestamp(),
+                            },
+                        );
+
+                    true
+                },
+                Result::Err(error) => {
+                    self
+                        .emit(
+                            ProofRejected {
+                                proof_type: 'withdraw', caller: get_caller_address(), error: error,
+                            },
+                        );
+
+                    false
+                },
+            }
         }
     }
 }

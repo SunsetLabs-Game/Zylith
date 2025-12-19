@@ -17,7 +17,7 @@ use starknet::storage::*;
 /// where it can access storage nodes directly
 pub fn execute_private_withdraw(
     proof: Array<felt252>, public_inputs: Array<felt252>, recipient: ContractAddress, amount: u128,
-) {// TODO: Step 1 - Verify ZK proof using Garaga verifier
+) { // TODO: Step 1 - Verify ZK proof using Garaga verifier
 // let is_valid = verifier::verify(proof, public_inputs);
 // assert(is_valid, 'Invalid ZK proof');
 
