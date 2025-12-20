@@ -30,7 +30,10 @@ pub fn hash_nodes(left: felt252, right: felt252) -> felt252 {
     let state: u384 = poseidon_hash_2_bn254(left.into(), right.into());
 
     let x: u256 = state.try_into().unwrap();
-    x.try_into().unwrap()
+    // Mask to ensure result fits in felt252 (BN254 prime > STARK prime)
+    let mask: u256 = 0x3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+    let safe_val = x & mask;
+    safe_val.try_into().unwrap()
 }
 
 /// Calculate Merkle root from leaves (recursive calculation)

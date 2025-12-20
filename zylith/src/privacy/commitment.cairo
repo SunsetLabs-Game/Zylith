@@ -10,7 +10,13 @@ pub fn generate_commitment(secret: felt252, nullifier: felt252, amount: u128) ->
     let state1: u384 = poseidon_hash_2_bn254(secret.into(), nullifier.into());
     let state2: u256 = poseidon_hash_2_bn254(state1, amount.into()).try_into().unwrap();
 
-    state2.try_into().unwrap()
+    // The BN254 prime is larger than the STARK prime (felt252).
+    // To safely convert, we mask the result to ensure it fits in a felt252.
+    // felt252 is approximately 2^251 + ...
+    // We use a safe mask of 250 bits to ensure compatibility.
+    let mask: u256 = 0x3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+    let safe_val = state2 & mask;
+    safe_val.try_into().unwrap()
 }
 
 /// Verify a commitment matches the expected values
