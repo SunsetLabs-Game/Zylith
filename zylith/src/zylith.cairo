@@ -14,6 +14,10 @@ pub mod Zylith {
     use zylith::privacy::commitment::NullifierStorage;
     use zylith::privacy::deposit::DepositStorage;
     use zylith::privacy::merkle_tree::MerkleTreeStorage;
+    use crate::privacy::verifiers::lp::groth16_verifier::{
+        IGroth16VerifierBN254Dispatcher as ILPVerifier,
+        IGroth16VerifierBN254DispatcherTrait as ILPVerifierTrait,
+    };
 
     // Import the Groth16 verifiers directly
     use crate::privacy::verifiers::membership::groth16_verifier::{
@@ -47,6 +51,7 @@ pub mod Zylith {
         membership_verifier: ContractAddress,
         swap_verifier: ContractAddress,
         withdraw_verifier: ContractAddress,
+        lp_verifier: ContractAddress,
     }
 
     #[event]
@@ -89,11 +94,13 @@ pub mod Zylith {
         membership_verifier: ContractAddress,
         swap_verifier: ContractAddress,
         withdraw_verifier: ContractAddress,
+        lp_verifier: ContractAddress,
     ) {
         self.owner.write(owner);
         self.membership_verifier.write(membership_verifier);
         self.swap_verifier.write(swap_verifier);
         self.withdraw_verifier.write(withdraw_verifier);
+        self.lp_verifier.write(lp_verifier);
         self.initialized.write(false);
     }
 

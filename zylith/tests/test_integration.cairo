@@ -17,12 +17,14 @@ fn deploy_zylith() -> IZylithDispatcher {
     let (membership_verifier, _) = mock_verifier_class.deploy(@array![]).unwrap();
     let (swap_verifier, _) = mock_verifier_class.deploy(@array![]).unwrap();
     let (withdraw_verifier, _) = mock_verifier_class.deploy(@array![]).unwrap();
+    let (lp_verifier, _) = mock_verifier_class.deploy(@array![]).unwrap();
 
     let mut constructor_args = array![];
     constructor_args.append(owner.into());
     constructor_args.append(membership_verifier.into());
     constructor_args.append(swap_verifier.into());
     constructor_args.append(withdraw_verifier.into());
+    constructor_args.append(lp_verifier.into());
 
     let (contract_address, _) = contract.deploy(@constructor_args).unwrap();
     IZylithDispatcher { contract_address }
