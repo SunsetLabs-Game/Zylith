@@ -14,12 +14,14 @@ fn deploy_zylith() -> IZylithDispatcher {
     let membership_verifier: ContractAddress = 2.try_into().unwrap();
     let swap_verifier: ContractAddress = 3.try_into().unwrap();
     let withdraw_verifier: ContractAddress = 4.try_into().unwrap();
+    let lp_verifier: ContractAddress = 5.try_into().unwrap();
 
     let mut constructor_args = array![];
     constructor_args.append(owner.into());
     constructor_args.append(membership_verifier.into());
     constructor_args.append(swap_verifier.into());
     constructor_args.append(withdraw_verifier.into());
+    constructor_args.append(lp_verifier.into());
 
     let (contract_address, _) = contract.deploy(@constructor_args).unwrap();
     IZylithDispatcher { contract_address }
@@ -166,10 +168,8 @@ fn test_merkle_root_consistency() {
 
     // Deposit multiple commitments
     let commitments = array![
-        commitment::generate_commitment(1, 1, 1000),
-        commitment::generate_commitment(2, 2, 2000),
-        commitment::generate_commitment(3, 3, 3000),
-        commitment::generate_commitment(4, 4, 4000),
+        commitment::generate_commitment(1, 1, 1000), commitment::generate_commitment(2, 2, 2000),
+        commitment::generate_commitment(3, 3, 3000), commitment::generate_commitment(4, 4, 4000),
     ];
 
     let mut roots: Array<felt252> = ArrayTrait::new();

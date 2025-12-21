@@ -20,6 +20,11 @@ pub mod verifiers {
         pub mod groth16_verifier;
         pub mod groth16_verifier_constants;
     }
+
+    pub mod lp {
+        pub mod groth16_verifier;
+        pub mod groth16_verifier_constants;
+    }
 }
 
 pub use verifier::{IZKVerifier, IZKVerifierDispatcher, IZKVerifierDispatcherTrait};

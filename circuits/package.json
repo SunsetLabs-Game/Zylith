@@ -1,0 +1,11 @@
+{
+    "name": "zylith-circuits",
+    "version": "1.0.0",
+    "dependencies": {
+        "circomlib": "^2.0.5",
+        "snarkjs": "^0.7.0"
+    },
+    "scripts": {
+        "compile": "mkdir -p out && circom membership.circom --r1cs --wasm --sym --output out && circom swap.circom --r1cs --wasm --sym --output out && circom withdraw.circom --r1cs --wasm --sym --output out && circom lp.circom --r1cs --wasm --sym --output out"
+    }
+}
