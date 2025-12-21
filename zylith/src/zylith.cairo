@@ -15,23 +15,24 @@ pub mod Zylith {
     use zylith::privacy::deposit::DepositStorage;
     use zylith::privacy::merkle_tree::MerkleTreeStorage;
     use crate::privacy::verifiers::lp::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher as ILPVerifier,
-        IGroth16VerifierBN254DispatcherTrait as ILPVerifierTrait,
+        ILPGroth16VerifierBN254Dispatcher as ILPVerifier,
+        ILPGroth16VerifierBN254DispatcherTrait as ILPVerifierTrait,
     };
 
     // Import the Groth16 verifiers directly
     use crate::privacy::verifiers::membership::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher as IMembershipVerifier,
-        IGroth16VerifierBN254DispatcherTrait as IMembershipVerifierTrait,
+        IMembershipGroth16VerifierBN254Dispatcher as IMembershipVerifier,
+        IMembershipGroth16VerifierBN254DispatcherTrait as IMembershipVerifierTrait,
     };
     use crate::privacy::verifiers::swap::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher as ISwapVerifier,
-        IGroth16VerifierBN254DispatcherTrait as ISwapVerifierTrait,
+        ISwapGroth16VerifierBN254Dispatcher as ISwapVerifier,
+        ISwapGroth16VerifierBN254DispatcherTrait as ISwapVerifierTrait,
     };
     use crate::privacy::verifiers::withdraw::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher as IWithdrawVerifier,
-        IGroth16VerifierBN254DispatcherTrait as IWithdrawVerifierTrait,
+        IWithdrawGroth16VerifierBN254Dispatcher as IWithdrawVerifier,
+        IWithdrawGroth16VerifierBN254DispatcherTrait as IWithdrawVerifierTrait,
     };
+    use zylith::interfaces::ierc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 
     #[storage]
     pub struct Storage {
@@ -96,6 +97,7 @@ pub mod Zylith {
         withdraw_verifier: ContractAddress,
         lp_verifier: ContractAddress,
     ) {
+        // Use deployment version to ensure unique class hash
         self.owner.write(owner);
         self.membership_verifier.write(membership_verifier);
         self.swap_verifier.write(swap_verifier);
@@ -132,6 +134,14 @@ pub mod Zylith {
             self.pool.protocol_fee0.write(0); // Default: no protocol fee
             self.pool.protocol_fee1.write(0); // Default: no protocol fee
 
+            // Initialize Merkle tree with empty root as known
+            // The empty tree has root = 0, mark it as valid historical root
+            let initial_root: felt252 = 0;
+            self.merkle_tree.root.write(initial_root);
+            self.merkle_tree.next_index.write(0);
+            self.merkle_tree.known_roots.entry(initial_root).write(true);
+            self.merkle_tree.known_roots_count.write(1);
+
             self.initialized.write(true);
 
             self
@@ -142,32 +152,30 @@ pub mod Zylith {
                 );
         }
 
-        /// Private deposit - add commitment to Merkle tree
-        fn private_deposit(ref self: ContractState, commitment: felt252) {
-            // Insert commitment into Merkle tree
-            let index = self.merkle_tree.next_index.read();
-            self.merkle_tree.leaves.entry(index).write(commitment);
-            self.merkle_tree.next_index.write(index + 1);
+        /// Private deposit - transfer tokens and add commitment to Merkle tree
+        fn private_deposit(
+            ref self: ContractState, token: ContractAddress, amount: u256, commitment: felt252
+        ) {
+            let caller = get_caller_address();
+            let this_contract = starknet::get_contract_address();
 
-            // Update Merkle root incrementally (O(log N)) instead of recalculating (O(N))
-            // This significantly reduces gas usage
-            let new_root = InternalFunctionsImpl::_update_merkle_root(ref self, index, commitment);
-            self.merkle_tree.root.write(new_root);
+            // Validate token is either token0 or token1
+            let token0 = self.pool.token0.read();
+            let token1 = self.pool.token1.read();
+            assert(token == token0 || token == token1, 'INVALID_TOKEN');
 
-            // Emit event for ASP synchronization
-            self
-                .emit(
-                    Event::PrivacyEvent(
-                        zylith::privacy::deposit::PrivacyEvent::Deposit(
-                            zylith::privacy::deposit::Deposit {
-                                commitment, leaf_index: index, root: new_root,
-                            },
-                        ),
-                    ),
-                );
+            // Transfer tokens from caller to this contract using ERC20
+            let erc20 = IERC20Dispatcher { contract_address: token };
+            let success = erc20.transfer_from(caller, this_contract, amount);
+            assert(success, 'TRANSFER_FAILED');
+
+            // Insert commitment into Merkle tree (without additional token transfer)
+            InternalFunctionsImpl::_insert_commitment(ref self, commitment);
         }
 
         /// Private swap with ZK proof verification
+        /// SECURITY: Validates nullifier (prevents double-spend), historical root, and swap transition
+        /// The proof must include expected swap outputs which are verified against on-chain execution
         fn private_swap(
             ref self: ContractState,
             proof: Array<felt252>,
@@ -182,38 +190,75 @@ pub mod Zylith {
             let verifier = ISwapVerifier { contract_address: swap_verifier_addr };
             let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
 
-            // In a production environment, we would validate that verified_inputs
-            // match the public_inputs provided. For MVP, we use public_inputs for logic.
-
-            // Step 2 - Use verified values from ZK proof
-            // Verified inputs indices (mapping to circuit public outputs):
-            // 0: commitment (the one being spent)
-            // 1: root
-            // 2: new_commitment
+            // Step 2 - Extract verified values from ZK proof
+            // Verified inputs layout (swap circuit - includes swap transition outputs):
+            // 0: nullifier (to prevent double-spend of input note)
+            // 1: root (Merkle root for membership proof)
+            // 2: new_commitment (output note commitment)
             // 3: amount_specified (u128 stored in lower bits of u256)
             // 4: zero_for_one (0 for false, 1 for true)
+            // 5: expected_amount0_delta (i128 as u256)
+            // 6: expected_amount1_delta (i128 as u256)
+            // 7: expected_new_sqrt_price_x128 (u256)
+            // 8: expected_new_tick (i32 as u256)
+            assert(_verified_inputs.len() >= 9, 'INVALID_VERIFIED_INPUTS_LEN');
 
-            assert(_verified_inputs.len() >= 5, 'INVALID_VERIFIED_INPUTS_LEN');
-
+            let verified_nullifier: felt252 = (*_verified_inputs.at(0)).try_into().unwrap();
             let verified_root: felt252 = (*_verified_inputs.at(1)).try_into().unwrap();
-            let verified_amount: u128 = (*_verified_inputs.at(3)).low;
             let verified_new_commitment: felt252 = (*_verified_inputs.at(2)).try_into().unwrap();
+            let verified_amount: u128 = (*_verified_inputs.at(3)).low;
+            // Indices 5-8: expected swap transition outputs (will be verified after execution)
+            let expected_amount0_delta: i128 = (*_verified_inputs.at(5)).low.try_into().unwrap();
+            let expected_amount1_delta: i128 = (*_verified_inputs.at(6)).low.try_into().unwrap();
+            let expected_new_sqrt_price: u256 = *_verified_inputs.at(7);
+            let expected_new_tick: i32 = (*_verified_inputs.at(8)).low.try_into().unwrap();
 
-            // CRITICAL: Verify root matches current Merkle root
-            let current_root = self.merkle_tree.root.read();
-            assert(verified_root == current_root, 'INVALID_MERKLE_ROOT');
+            // CRITICAL: Verify root is known (current OR historical)
+            // This allows users to use proofs generated against older roots
+            let is_valid_root = InternalFunctionsImpl::_is_root_known(ref self, verified_root);
+            assert(is_valid_root, 'INVALID_MERKLE_ROOT');
 
             // CRITICAL: Ensure proof matches call arguments
             assert(verified_amount == amount_specified, 'AMOUNT_MISMATCH');
             assert(verified_new_commitment == new_commitment, 'COMMITMENT_MISMATCH');
 
-            // Step 3 - Execute swap in CLMM
+            // CRITICAL: Check nullifier hasn't been spent (prevents double-spend)
+            let is_spent = self.nullifiers.spent_nullifiers.entry(verified_nullifier).read();
+            assert(!is_spent, 'NULLIFIER_ALREADY_SPENT');
+
+            // Step 3 - Mark nullifier as spent BEFORE executing swap (CEI pattern)
+            self.nullifiers.spent_nullifiers.entry(verified_nullifier).write(true);
+
+            // Step 4 - Execute swap in CLMM
             let (amount0, amount1) = InternalFunctionsImpl::_execute_swap(
                 ref self, zero_for_one, amount_specified, sqrt_price_limit_x128,
             );
 
-            // Step 4 - Add new commitment to Merkle tree
-            self.private_deposit(new_commitment);
+            // Step 5 - CRITICAL: Verify swap transition matches proof expectations
+            // The proof computed the expected swap outputs off-chain; we verify they match on-chain
+            let actual_new_sqrt_price = self.pool.sqrt_price_x128.read();
+            let actual_new_tick = self.pool.tick.read();
+
+            // Compare deltas - the proof's expected values must match actual execution
+            assert(amount0 == expected_amount0_delta, 'AMOUNT0_DELTA_MISMATCH');
+            assert(amount1 == expected_amount1_delta, 'AMOUNT1_DELTA_MISMATCH');
+            assert(actual_new_sqrt_price == expected_new_sqrt_price, 'SQRT_PRICE_MISMATCH');
+            assert(actual_new_tick == expected_new_tick, 'TICK_MISMATCH');
+
+            // Step 6 - Add new commitment to Merkle tree
+            InternalFunctionsImpl::_insert_commitment(ref self, new_commitment);
+
+            // Step 7 - Emit nullifier spent event for tracking
+            self
+                .emit(
+                    Event::PrivacyEvent(
+                        zylith::privacy::deposit::PrivacyEvent::NullifierSpent(
+                            zylith::privacy::deposit::NullifierSpent {
+                                nullifier: verified_nullifier,
+                            },
+                        ),
+                    ),
+                );
 
             (amount0, amount1)
         }
@@ -223,6 +268,7 @@ pub mod Zylith {
             ref self: ContractState,
             proof: Array<felt252>,
             public_inputs: Array<felt252>,
+            token: ContractAddress,
             recipient: ContractAddress,
             amount: u128,
         ) {
@@ -245,27 +291,31 @@ pub mod Zylith {
             let verified_recipient_felt: felt252 = (*_verified_inputs.at(2)).try_into().unwrap();
             let verified_recipient: ContractAddress = verified_recipient_felt.try_into().unwrap();
 
-            // CRITICAL: Check root
-            let current_root = self.merkle_tree.root.read();
-            assert(verified_root == current_root, 'INVALID_MERKLE_ROOT');
+            // CRITICAL: Check root is known (current OR historical)
+            let is_valid_root = InternalFunctionsImpl::_is_root_known(ref self, verified_root);
+            assert(is_valid_root, 'INVALID_MERKLE_ROOT');
 
             // CRITICAL: Ensure call args match proof
             assert(verified_amount == amount, 'AMOUNT_MISMATCH');
             assert(verified_recipient == recipient, 'RECIPIENT_MISMATCH');
 
+            // Validate token is either token0 or token1
+            let token0 = self.pool.token0.read();
+            let token1 = self.pool.token1.read();
+            assert(token == token0 || token == token1, 'INVALID_TOKEN');
+
             // Check nullifier hasn't been spent
             let is_spent = self.nullifiers.spent_nullifiers.entry(verified_nullifier).read();
             assert(!is_spent, 'NULLIFIER_ALREADY_SPENT');
 
-            // Step 3 - Mark nullifier as spent
+            // Step 3 - Mark nullifier as spent (CEI pattern - before transfers)
             self.nullifiers.spent_nullifiers.entry(verified_nullifier).write(true);
 
-            // Step 4 - Transfer tokens to recipient
-            // TODO: Implement ERC20 transfer logic
-            // For now, this is a placeholder - actual implementation would:
-            // 1. Determine which token to transfer (from public_inputs or amount)
-            // 2. Call ERC20 transfer on the appropriate token contract
-            // 3. Handle both token0 and token1 if needed
+            // Step 4 - Transfer tokens to recipient using ERC20
+            let erc20 = IERC20Dispatcher { contract_address: token };
+            let amount_u256: u256 = amount.into();
+            let success = erc20.transfer(recipient, amount_u256);
+            assert(success, 'TRANSFER_FAILED');
 
             // Emit event
             self
@@ -278,6 +328,276 @@ pub mod Zylith {
                         ),
                     ),
                 );
+        }
+
+        /// Private mint - add liquidity with ZK proof verification
+        /// The proof verifies ownership of a commitment with sufficient balance
+        /// Tick ranges remain public in MVP (bounds privacy deferred)
+        fn private_mint(
+            ref self: ContractState,
+            proof: Array<felt252>,
+            public_inputs: Array<felt252>,
+            tick_lower: i32,
+            tick_upper: i32,
+            liquidity: u128,
+            new_commitment: felt252,
+        ) -> (u128, u128) {
+            // Step 1 - Verify ZK proof using Garaga LP verifier
+            let lp_verifier_addr = self.lp_verifier.read();
+            let verifier = ILPVerifier { contract_address: lp_verifier_addr };
+            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+
+            // Step 2 - Extract verified values from ZK proof
+            // Expected public inputs from LP circuit:
+            // 0: nullifier (to prevent double-spend of input commitment)
+            // 1: root (Merkle root for membership proof)
+            // 2: tick_lower
+            // 3: tick_upper
+            // 4: liquidity amount
+            // 5: new_commitment (for change/remaining balance)
+            // 6: position_commitment (unique identifier for this LP position)
+            assert(_verified_inputs.len() >= 7, 'INVALID_VERIFIED_INPUTS_LEN');
+
+            let verified_nullifier: felt252 = (*_verified_inputs.at(0)).try_into().unwrap();
+            let verified_root: felt252 = (*_verified_inputs.at(1)).try_into().unwrap();
+            let verified_tick_lower: i32 = (*_verified_inputs.at(2)).low.try_into().unwrap();
+            let verified_tick_upper: i32 = (*_verified_inputs.at(3)).low.try_into().unwrap();
+            let verified_liquidity: u128 = (*_verified_inputs.at(4)).low;
+            let verified_new_commitment: felt252 = (*_verified_inputs.at(5)).try_into().unwrap();
+            let position_commitment: felt252 = (*_verified_inputs.at(6)).try_into().unwrap();
+
+            // Step 3 - Validate verified values match call parameters
+            // CRITICAL: Check root is known (current OR historical)
+            let is_valid_root = InternalFunctionsImpl::_is_root_known(ref self, verified_root);
+            assert(is_valid_root, 'INVALID_MERKLE_ROOT');
+            assert(verified_tick_lower == tick_lower, 'TICK_LOWER_MISMATCH');
+            assert(verified_tick_upper == tick_upper, 'TICK_UPPER_MISMATCH');
+            assert(verified_liquidity == liquidity, 'LIQUIDITY_MISMATCH');
+            assert(verified_new_commitment == new_commitment, 'COMMITMENT_MISMATCH');
+
+            // Check nullifier hasn't been spent
+            let is_spent = self.nullifiers.spent_nullifiers.entry(verified_nullifier).read();
+            assert(!is_spent, 'NULLIFIER_ALREADY_SPENT');
+
+            // Step 4 - Mark nullifier as spent (CEI pattern)
+            self.nullifiers.spent_nullifiers.entry(verified_nullifier).write(true);
+
+            // Step 5 - Execute the mint logic (similar to public mint but using commitment-based ownership)
+            // Note: The actual token amounts are calculated internally, not from the proof
+            // This ensures the CLMM math is correct and not manipulated
+            assert!(tick_lower < tick_upper);
+            assert!(tick_lower % tick::TICK_SPACING == 0);
+            assert!(tick_upper % tick::TICK_SPACING == 0);
+            assert!(liquidity > 0);
+
+            // Derive position owner from position_commitment
+            // This ensures each private position has a unique key based on its commitment
+            // The same user can have multiple positions with different position_commitments
+            let position_owner: ContractAddress = position_commitment.try_into().unwrap();
+            let current_tick = self.pool.tick.read();
+            let current_sqrt_price = self.pool.sqrt_price_x128.read();
+
+            let sqrt_price_lower = math::get_sqrt_ratio_at_tick(tick_lower);
+            let sqrt_price_upper = math::get_sqrt_ratio_at_tick(tick_upper);
+
+            // Calculate actual token amounts needed
+            let (amount0_final, amount1_final) = if current_tick < tick_lower {
+                let amount1 = liquidity::get_amount1_for_liquidity(
+                    sqrt_price_lower, sqrt_price_upper, liquidity,
+                );
+                (0, amount1)
+            } else if current_tick >= tick_upper {
+                let amount0 = liquidity::get_amount0_for_liquidity(
+                    sqrt_price_lower, sqrt_price_upper, liquidity,
+                );
+                (amount0, 0)
+            } else {
+                let amount0 = liquidity::get_amount0_for_liquidity(
+                    current_sqrt_price, sqrt_price_upper, liquidity,
+                );
+                let amount1 = liquidity::get_amount1_for_liquidity(
+                    sqrt_price_lower, current_sqrt_price, liquidity,
+                );
+                (amount0, amount1)
+            };
+
+            // Calculate fee growth inside range
+            let fee_growth_inside0 = InternalFunctionsImpl::_get_fee_growth_inside(
+                ref self, tick_lower, tick_upper, true
+            );
+            let fee_growth_inside1 = InternalFunctionsImpl::_get_fee_growth_inside(
+                ref self, tick_lower, tick_upper, false
+            );
+
+            // Update position
+            let position_key = (position_owner, tick_lower, tick_upper);
+            let position_info = self.positions.positions.entry(position_key).read();
+
+            let updated_position = zylith::clmm::position::PositionInfo {
+                liquidity: position_info.liquidity + liquidity,
+                fee_growth_inside0_last_x128: fee_growth_inside0,
+                fee_growth_inside1_last_x128: fee_growth_inside1,
+                tokens_owed0: position_info.tokens_owed0,
+                tokens_owed1: position_info.tokens_owed1,
+            };
+            self.positions.positions.entry(position_key).write(updated_position);
+
+            // Update ticks
+            InternalFunctionsImpl::_update_tick(ref self, tick_lower, liquidity, false);
+            InternalFunctionsImpl::_update_tick(ref self, tick_upper, liquidity, true);
+
+            // Update global liquidity if price is in range
+            if current_tick >= tick_lower && current_tick < tick_upper {
+                let current_liquidity = self.pool.liquidity.read();
+                self.pool.liquidity.write(current_liquidity + liquidity);
+            }
+
+            // Step 6 - Tokens are already in the contract (from the original private_deposit)
+            // No ERC20 transfers needed here - the user's balance was already deposited privately
+
+            // Step 7 - Insert new commitment for remaining balance
+            InternalFunctionsImpl::_insert_commitment(ref self, new_commitment);
+
+            (amount0_final, amount1_final)
+        }
+
+        /// Private burn - remove liquidity with ZK proof verification
+        fn private_burn(
+            ref self: ContractState,
+            proof: Array<felt252>,
+            public_inputs: Array<felt252>,
+            tick_lower: i32,
+            tick_upper: i32,
+            liquidity: u128,
+            new_commitment: felt252,
+        ) -> (u128, u128) {
+            // Step 1 - Verify ZK proof using Garaga LP verifier
+            let lp_verifier_addr = self.lp_verifier.read();
+            let verifier = ILPVerifier { contract_address: lp_verifier_addr };
+            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+
+            // Step 2 - Extract verified values from ZK proof
+            // Expected public inputs:
+            // 0: nullifier
+            // 1: root
+            // 2: tick_lower
+            // 3: tick_upper
+            // 4: liquidity to burn
+            // 5: new_commitment (for the withdrawn tokens)
+            // 6: position_commitment (unique identifier for the LP position being burned)
+            assert(_verified_inputs.len() >= 7, 'INVALID_VERIFIED_INPUTS_LEN');
+
+            let verified_nullifier: felt252 = (*_verified_inputs.at(0)).try_into().unwrap();
+            let verified_root: felt252 = (*_verified_inputs.at(1)).try_into().unwrap();
+            let verified_tick_lower: i32 = (*_verified_inputs.at(2)).low.try_into().unwrap();
+            let verified_tick_upper: i32 = (*_verified_inputs.at(3)).low.try_into().unwrap();
+            let verified_liquidity: u128 = (*_verified_inputs.at(4)).low;
+            let verified_new_commitment: felt252 = (*_verified_inputs.at(5)).try_into().unwrap();
+            let position_commitment: felt252 = (*_verified_inputs.at(6)).try_into().unwrap();
+
+            // Step 3 - Validate verified values
+            // CRITICAL: Check root is known (current OR historical)
+            let is_valid_root = InternalFunctionsImpl::_is_root_known(ref self, verified_root);
+            assert(is_valid_root, 'INVALID_MERKLE_ROOT');
+            assert(verified_tick_lower == tick_lower, 'TICK_LOWER_MISMATCH');
+            assert(verified_tick_upper == tick_upper, 'TICK_UPPER_MISMATCH');
+            assert(verified_liquidity == liquidity, 'LIQUIDITY_MISMATCH');
+            assert(verified_new_commitment == new_commitment, 'COMMITMENT_MISMATCH');
+
+            // Check nullifier hasn't been spent
+            let is_spent = self.nullifiers.spent_nullifiers.entry(verified_nullifier).read();
+            assert(!is_spent, 'NULLIFIER_ALREADY_SPENT');
+
+            // Step 4 - Mark nullifier as spent (CEI pattern)
+            self.nullifiers.spent_nullifiers.entry(verified_nullifier).write(true);
+
+            // Step 5 - Execute burn logic
+            assert!(tick_lower < tick_upper);
+            assert!(tick_lower % tick::TICK_SPACING == 0);
+            assert!(tick_upper % tick::TICK_SPACING == 0);
+            assert!(liquidity > 0);
+
+            // Derive position owner from position_commitment
+            // Must match the same commitment used when the position was created via private_mint
+            let position_owner: ContractAddress = position_commitment.try_into().unwrap();
+            let position_key = (position_owner, tick_lower, tick_upper);
+            let position_info = self.positions.positions.entry(position_key).read();
+
+            // Ensure we don't burn more than available
+            let burn_amount: u128 = if position_info.liquidity < liquidity {
+                position_info.liquidity
+            } else {
+                liquidity
+            };
+
+            assert!(burn_amount > 0);
+
+            // Calculate fee growth inside
+            let fee_growth_inside0 = InternalFunctionsImpl::_get_fee_growth_inside(
+                ref self, tick_lower, tick_upper, true,
+            );
+            let fee_growth_inside1 = InternalFunctionsImpl::_get_fee_growth_inside(
+                ref self, tick_lower, tick_upper, false,
+            );
+
+            // Calculate amounts to return
+            let sqrt_price_lower = math::get_sqrt_ratio_at_tick(tick_lower);
+            let sqrt_price_upper = math::get_sqrt_ratio_at_tick(tick_upper);
+
+            let amount0 = liquidity::get_amount0_for_liquidity(
+                sqrt_price_lower, sqrt_price_upper, burn_amount,
+            );
+            let amount1 = liquidity::get_amount1_for_liquidity(
+                sqrt_price_lower, sqrt_price_upper, burn_amount,
+            );
+
+            // Apply protocol fee if configured
+            let protocol_fee0 = self.pool.protocol_fee0.read();
+            let protocol_fee1 = self.pool.protocol_fee1.read();
+
+            let final_amount0 = if protocol_fee0 > 0 {
+                amount0 - (amount0 * protocol_fee0) / 1000000
+            } else {
+                amount0
+            };
+
+            let final_amount1 = if protocol_fee1 > 0 {
+                amount1 - (amount1 * protocol_fee1) / 1000000
+            } else {
+                amount1
+            };
+
+            // Update position
+            let new_liquidity = position_info.liquidity - burn_amount;
+            let updated_position = zylith::clmm::position::PositionInfo {
+                liquidity: new_liquidity,
+                fee_growth_inside0_last_x128: fee_growth_inside0,
+                fee_growth_inside1_last_x128: fee_growth_inside1,
+                tokens_owed0: position_info.tokens_owed0,
+                tokens_owed1: position_info.tokens_owed1,
+            };
+            self.positions.positions.entry(position_key).write(updated_position);
+
+            // Update ticks
+            InternalFunctionsImpl::_update_tick(ref self, tick_lower, burn_amount, false);
+            InternalFunctionsImpl::_update_tick(ref self, tick_upper, burn_amount, true);
+
+            // Update global liquidity if price is in range
+            let current_tick = self.pool.tick.read();
+            if current_tick >= tick_lower && current_tick < tick_upper {
+                let current_liquidity = self.pool.liquidity.read();
+                if burn_amount <= current_liquidity {
+                    self.pool.liquidity.write(current_liquidity - burn_amount);
+                } else {
+                    self.pool.liquidity.write(0);
+                };
+            }
+
+            // Step 6 - Tokens remain in contract, create new commitment for withdrawn amounts
+            // No ERC20 transfers - user will withdraw privately later using private_withdraw
+            InternalFunctionsImpl::_insert_commitment(ref self, new_commitment);
+
+            (final_amount0, final_amount1)
         }
 
         /// Mint liquidity position
@@ -455,6 +775,25 @@ pub mod Zylith {
                 self.pool.liquidity.write(current_liquidity + liquidity_needed);
             }
 
+            // Transfer tokens from caller to contract
+            let this_contract = starknet::get_contract_address();
+            let token0 = self.pool.token0.read();
+            let token1 = self.pool.token1.read();
+
+            if amount0_final > 0 {
+                let erc20_token0 = IERC20Dispatcher { contract_address: token0 };
+                let amount0_u256: u256 = amount0_final.into();
+                let success0 = erc20_token0.transfer_from(caller, this_contract, amount0_u256);
+                assert(success0, 'TOKEN0_TRANSFER_FAILED');
+            }
+
+            if amount1_final > 0 {
+                let erc20_token1 = IERC20Dispatcher { contract_address: token1 };
+                let amount1_u256: u256 = amount1_final.into();
+                let success1 = erc20_token1.transfer_from(caller, this_contract, amount1_u256);
+                assert(success1, 'TOKEN1_TRANSFER_FAILED');
+            }
+
             (amount0_final, amount1_final)
         }
 
@@ -465,9 +804,55 @@ pub mod Zylith {
             amount_specified: u128,
             sqrt_price_limit_x128: u256,
         ) -> (i128, i128) {
-            InternalFunctionsImpl::_execute_swap(
+            let caller = get_caller_address();
+            let this_contract = starknet::get_contract_address();
+            let token0 = self.pool.token0.read();
+            let token1 = self.pool.token1.read();
+
+            // Execute the swap logic
+            let (amount0, amount1) = InternalFunctionsImpl::_execute_swap(
                 ref self, zero_for_one, amount_specified, sqrt_price_limit_x128,
-            )
+            );
+
+            // Handle token transfers based on swap direction
+            // amount0 and amount1 are signed (i128): negative = output, positive = input
+            if zero_for_one {
+                // Swapping token0 for token1
+                // amount0 is positive (input), amount1 is negative (output)
+                if amount0 > 0 {
+                    let erc20_token0 = IERC20Dispatcher { contract_address: token0 };
+                    let amount0_abs: u128 = amount0.try_into().unwrap();
+                    let amount0_u256: u256 = amount0_abs.into();
+                    let success = erc20_token0.transfer_from(caller, this_contract, amount0_u256);
+                    assert(success, 'TOKEN0_TRANSFER_FAILED');
+                }
+                if amount1 < 0 {
+                    let erc20_token1 = IERC20Dispatcher { contract_address: token1 };
+                    let amount1_abs: u128 = (-amount1).try_into().unwrap();
+                    let amount1_u256: u256 = amount1_abs.into();
+                    let success = erc20_token1.transfer(caller, amount1_u256);
+                    assert(success, 'TOKEN1_TRANSFER_FAILED');
+                }
+            } else {
+                // Swapping token1 for token0
+                // amount1 is positive (input), amount0 is negative (output)
+                if amount1 > 0 {
+                    let erc20_token1 = IERC20Dispatcher { contract_address: token1 };
+                    let amount1_abs: u128 = amount1.try_into().unwrap();
+                    let amount1_u256: u256 = amount1_abs.into();
+                    let success = erc20_token1.transfer_from(caller, this_contract, amount1_u256);
+                    assert(success, 'TOKEN1_TRANSFER_FAILED');
+                }
+                if amount0 < 0 {
+                    let erc20_token0 = IERC20Dispatcher { contract_address: token0 };
+                    let amount0_abs: u128 = (-amount0).try_into().unwrap();
+                    let amount0_u256: u256 = amount0_abs.into();
+                    let success = erc20_token0.transfer(caller, amount0_u256);
+                    assert(success, 'TOKEN0_TRANSFER_FAILED');
+                }
+            }
+
+            (amount0, amount1)
         }
 
         /// Get Merkle root
@@ -478,6 +863,22 @@ pub mod Zylith {
         /// Check if nullifier is spent
         fn is_nullifier_spent(self: @ContractState, nullifier: felt252) -> bool {
             self.nullifiers.spent_nullifiers.entry(nullifier).read()
+        }
+
+        /// Check if a root is known (current or historical)
+        /// This enables proof flexibility - users can generate proofs against older roots
+        fn is_root_known(self: @ContractState, root: felt252) -> bool {
+            // Check if it's the current root OR a known historical root
+            let current_root = self.merkle_tree.root.read();
+            if root == current_root {
+                return true;
+            }
+            self.merkle_tree.known_roots.entry(root).read()
+        }
+
+        /// Get the count of known historical roots
+        fn get_known_roots_count(self: @ContractState) -> u32 {
+            self.merkle_tree.known_roots_count.read()
         }
 
         /// Burn liquidity position
@@ -584,6 +985,24 @@ pub mod Zylith {
                 };
             }
 
+            // Transfer tokens from contract to caller
+            let token0 = self.pool.token0.read();
+            let token1 = self.pool.token1.read();
+
+            if final_amount0 > 0 {
+                let erc20_token0 = IERC20Dispatcher { contract_address: token0 };
+                let amount0_u256: u256 = final_amount0.into();
+                let success0 = erc20_token0.transfer(caller, amount0_u256);
+                assert(success0, 'TOKEN0_TRANSFER_FAILED');
+            }
+
+            if final_amount1 > 0 {
+                let erc20_token1 = IERC20Dispatcher { contract_address: token1 };
+                let amount1_u256: u256 = final_amount1.into();
+                let success1 = erc20_token1.transfer(caller, amount1_u256);
+                assert(success1, 'TOKEN1_TRANSFER_FAILED');
+            }
+
             (final_amount0, final_amount1)
         }
 
@@ -637,6 +1056,140 @@ pub mod Zylith {
             };
             self.positions.positions.entry(position_key).write(updated_position);
 
+            // Transfer collected fees to caller
+            let token0 = self.pool.token0.read();
+            let token1 = self.pool.token1.read();
+
+            if total_fees0 > 0 {
+                let erc20_token0 = IERC20Dispatcher { contract_address: token0 };
+                let amount0_u256: u256 = total_fees0.into();
+                let success0 = erc20_token0.transfer(caller, amount0_u256);
+                assert(success0, 'FEE0_TRANSFER_FAILED');
+            }
+
+            if total_fees1 > 0 {
+                let erc20_token1 = IERC20Dispatcher { contract_address: token1 };
+                let amount1_u256: u256 = total_fees1.into();
+                let success1 = erc20_token1.transfer(caller, amount1_u256);
+                assert(success1, 'FEE1_TRANSFER_FAILED');
+            }
+
+            (total_fees0, total_fees1)
+        }
+
+        /// Private collect - collect fees from a private LP position
+        /// Instead of transferring ERC20, creates a new commitment for the collected fees
+        /// The fees remain in the contract and user can withdraw them privately later
+        fn private_collect(
+            ref self: ContractState,
+            proof: Array<felt252>,
+            public_inputs: Array<felt252>,
+            tick_lower: i32,
+            tick_upper: i32,
+            new_commitment: felt252,
+        ) -> (u128, u128) {
+            // Step 1 - Verify ZK proof using Garaga LP verifier
+            let lp_verifier_addr = self.lp_verifier.read();
+            let verifier = ILPVerifier { contract_address: lp_verifier_addr };
+            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+
+            // Step 2 - Extract verified values from ZK proof
+            // Expected public inputs for private_collect:
+            // 0: nullifier (for the position note being used)
+            // 1: root (Merkle root for membership proof)
+            // 2: tick_lower
+            // 3: tick_upper
+            // 4: new_commitment (commitment for the collected fees)
+            // 5: position_commitment (unique identifier for the LP position)
+            assert(_verified_inputs.len() >= 6, 'INVALID_VERIFIED_INPUTS_LEN');
+
+            let verified_nullifier: felt252 = (*_verified_inputs.at(0)).try_into().unwrap();
+            let verified_root: felt252 = (*_verified_inputs.at(1)).try_into().unwrap();
+            let verified_tick_lower: i32 = (*_verified_inputs.at(2)).low.try_into().unwrap();
+            let verified_tick_upper: i32 = (*_verified_inputs.at(3)).low.try_into().unwrap();
+            let verified_new_commitment: felt252 = (*_verified_inputs.at(4)).try_into().unwrap();
+            let position_commitment: felt252 = (*_verified_inputs.at(5)).try_into().unwrap();
+
+            // Step 3 - Validate verified values
+            let is_valid_root = InternalFunctionsImpl::_is_root_known(ref self, verified_root);
+            assert(is_valid_root, 'INVALID_MERKLE_ROOT');
+            assert(verified_tick_lower == tick_lower, 'TICK_LOWER_MISMATCH');
+            assert(verified_tick_upper == tick_upper, 'TICK_UPPER_MISMATCH');
+            assert(verified_new_commitment == new_commitment, 'COMMITMENT_MISMATCH');
+
+            // Check nullifier hasn't been spent
+            let is_spent = self.nullifiers.spent_nullifiers.entry(verified_nullifier).read();
+            assert(!is_spent, 'NULLIFIER_ALREADY_SPENT');
+
+            // Step 4 - Mark nullifier as spent
+            self.nullifiers.spent_nullifiers.entry(verified_nullifier).write(true);
+
+            // Step 5 - Calculate fees for the private position
+            // Derive position owner from position_commitment
+            let position_owner: ContractAddress = position_commitment.try_into().unwrap();
+            let position_key = (position_owner, tick_lower, tick_upper);
+            let position_info = self.positions.positions.entry(position_key).read();
+
+            // Calculate fee growth inside
+            let fee_growth_inside0 = InternalFunctionsImpl::_get_fee_growth_inside(
+                ref self, tick_lower, tick_upper, true,
+            );
+            let fee_growth_inside1 = InternalFunctionsImpl::_get_fee_growth_inside(
+                ref self, tick_lower, tick_upper, false,
+            );
+
+            // Calculate new fees owed
+            let fee_delta0 = fee_growth_inside0 - position_info.fee_growth_inside0_last_x128;
+            let fee_delta1 = fee_growth_inside1 - position_info.fee_growth_inside1_last_x128;
+
+            let new_fees_owed0: u128 = if position_info.liquidity > 0 {
+                let liquidity_u256: u256 = position_info.liquidity.try_into().unwrap();
+                let q128: u256 = 340282366920938463463374607431768211456; // 2^128
+                let fees = (fee_delta0 * liquidity_u256) / q128;
+                fees.try_into().unwrap()
+            } else {
+                0
+            };
+
+            let new_fees_owed1: u128 = if position_info.liquidity > 0 {
+                let liquidity_u256: u256 = position_info.liquidity.try_into().unwrap();
+                let q128: u256 = 340282366920938463463374607431768211456; // 2^128
+                let fees = (fee_delta1 * liquidity_u256) / q128;
+                fees.try_into().unwrap()
+            } else {
+                0
+            };
+
+            // Total fees to collect
+            let total_fees0 = position_info.tokens_owed0 + new_fees_owed0;
+            let total_fees1 = position_info.tokens_owed1 + new_fees_owed1;
+
+            // Update position - reset tokens_owed and update fee_growth
+            let updated_position = zylith::clmm::position::PositionInfo {
+                liquidity: position_info.liquidity,
+                fee_growth_inside0_last_x128: fee_growth_inside0,
+                fee_growth_inside1_last_x128: fee_growth_inside1,
+                tokens_owed0: 0,
+                tokens_owed1: 0,
+            };
+            self.positions.positions.entry(position_key).write(updated_position);
+
+            // Step 6 - Insert new commitment for the collected fees
+            // The fees remain in the contract; user can withdraw privately later
+            InternalFunctionsImpl::_insert_commitment(ref self, new_commitment);
+
+            // Emit nullifier spent event
+            self
+                .emit(
+                    Event::PrivacyEvent(
+                        zylith::privacy::deposit::PrivacyEvent::NullifierSpent(
+                            zylith::privacy::deposit::NullifierSpent {
+                                nullifier: verified_nullifier,
+                            },
+                        ),
+                    ),
+                );
+
             (total_fees0, total_fees1)
         }
     }
@@ -644,6 +1197,51 @@ pub mod Zylith {
     /// Internal helper functions grouped using generate_trait
     #[generate_trait]
     impl InternalFunctionsImpl of InternalFunctionsTrait {
+        /// Internal function to insert a commitment into the Merkle tree
+        /// This does NOT transfer tokens - used by private_swap and other internal operations
+        /// Returns the new Merkle root
+        fn _insert_commitment(ref self: ContractState, commitment: felt252) -> felt252 {
+            // Insert commitment into Merkle tree
+            let index = self.merkle_tree.next_index.read();
+            self.merkle_tree.leaves.entry(index).write(commitment);
+            self.merkle_tree.next_index.write(index + 1);
+
+            // Update Merkle root incrementally
+            let new_root = Self::_update_merkle_root(ref self, index, commitment);
+            self.merkle_tree.root.write(new_root);
+
+            // Track this root in historical roots for proof flexibility
+            // This allows users to use proofs against any previously valid root
+            self.merkle_tree.known_roots.entry(new_root).write(true);
+            let roots_count = self.merkle_tree.known_roots_count.read();
+            self.merkle_tree.known_roots_count.write(roots_count + 1);
+
+            // Emit event for ASP synchronization
+            self
+                .emit(
+                    Event::PrivacyEvent(
+                        zylith::privacy::deposit::PrivacyEvent::Deposit(
+                            zylith::privacy::deposit::Deposit {
+                                commitment, leaf_index: index, root: new_root,
+                            },
+                        ),
+                    ),
+                );
+
+            new_root
+        }
+
+        /// Check if a root is known (either current or historical)
+        /// This enables proof flexibility - users can generate proofs against older roots
+        fn _is_root_known(ref self: ContractState, root: felt252) -> bool {
+            // Check if it's the current root OR a known historical root
+            let current_root = self.merkle_tree.root.read();
+            if root == current_root {
+                return true;
+            }
+            self.merkle_tree.known_roots.entry(root).read()
+        }
+
         /// Internal function to execute swap with tick crossing
         fn _execute_swap(
             ref self: ContractState,
@@ -1366,9 +1964,9 @@ pub mod Zylith {
             let mut current_hash = leaf;
             let mut current_index = index;
 
-            // Height of the tree (TREE_DEPTH = 20)
+            // Height of the tree (TREE_DEPTH = 25)
             let mut level: u32 = 0;
-            while level < 20 {
+            while level < 25 {
                 let sibling_index = if current_index % 2 == 0 {
                     current_index + 1
                 } else {

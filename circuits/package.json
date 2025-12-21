@@ -3,9 +3,11 @@
     "version": "1.0.0",
     "dependencies": {
         "circomlib": "^2.0.5",
+        "circomlibjs": "^0.1.7",
         "snarkjs": "^0.7.0"
     },
     "scripts": {
-        "compile": "mkdir -p out && circom membership.circom --r1cs --wasm --sym --output out && circom swap.circom --r1cs --wasm --sym --output out && circom withdraw.circom --r1cs --wasm --sym --output out && circom lp.circom --r1cs --wasm --sym --output out"
+        "compile": "mkdir -p out && circom membership.circom --r1cs --wasm --sym --output out && circom swap.circom --r1cs --wasm --sym --output out && circom withdraw.circom --r1cs --wasm --sym --output out && circom lp.circom --r1cs --wasm --sym --output out",
+        "generate:fixtures": "node scripts/generate_test_fixtures.js"
     }
 }

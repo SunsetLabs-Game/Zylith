@@ -18,15 +18,15 @@ pub mod ZKVerifier {
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::{ContractAddress, get_caller_address};
     use crate::privacy::verifiers::membership::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher, IGroth16VerifierBN254DispatcherTrait,
+        IMembershipGroth16VerifierBN254Dispatcher, IMembershipGroth16VerifierBN254DispatcherTrait,
     };
     use crate::privacy::verifiers::swap::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher as ISwapVerifier,
-        IGroth16VerifierBN254DispatcherTrait as ISwapVerifierTrait,
+        ISwapGroth16VerifierBN254Dispatcher as ISwapVerifier,
+        ISwapGroth16VerifierBN254DispatcherTrait as ISwapVerifierTrait,
     };
     use crate::privacy::verifiers::withdraw::groth16_verifier::{
-        IGroth16VerifierBN254Dispatcher as IWithdrawVerifier,
-        IGroth16VerifierBN254DispatcherTrait as IWithdrawVerifierTrait,
+        IWithdrawGroth16VerifierBN254Dispatcher as IWithdrawVerifier,
+        IWithdrawGroth16VerifierBN254DispatcherTrait as IWithdrawVerifierTrait,
     };
 
     #[storage]
@@ -82,7 +82,7 @@ pub mod ZKVerifier {
             ref self: ContractState, full_proof_with_hints: Span<felt252>,
         ) -> bool {
             let verifier_address = self.membership_verifier.read();
-            let verifier = IGroth16VerifierBN254Dispatcher { contract_address: verifier_address };
+            let verifier = IMembershipGroth16VerifierBN254Dispatcher { contract_address: verifier_address };
 
             // calling verifier
             let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);

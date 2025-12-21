@@ -1,5 +1,6 @@
 // Private Liquidity Provision Circuit for Zylith
 // Proves valid balance for minting/burning LP positions
+// Aligned with zylith.cairo private_mint/private_burn() expected public inputs
 
 pragma circom 2.1.0;
 
@@ -8,22 +9,44 @@ include "./node_modules/circomlib/circuits/bitify.circom";
 include "./lib/merkleTree.circom";
 
 template LPOperation(depth) {
-    // Public inputs
-    signal input root;
-    signal input balance_commitment_in;
-    signal input balance_commitment_out;
-    signal input liquidity_amount; // Amount of tokens contributing/receiving
-    
-    // Private inputs
-    signal input secret;
+    // ============================================
+    // PUBLIC INPUTS (order must match contract)
+    // ============================================
+    // [0]: nullifier - prevents double-spend of input note
     signal input nullifier;
-    signal input total_balance_in;
+    // [1]: root - Merkle root for membership proof
+    signal input root;
+    // [2]: tick_lower - lower tick of LP position
+    signal input tick_lower;
+    // [3]: tick_upper - upper tick of LP position
+    signal input tick_upper;
+    // [4]: liquidity - amount of liquidity to mint/burn
+    signal input liquidity;
+    // [5]: new_commitment - output note commitment (change)
+    signal input new_commitment;
+    // [6]: position_commitment - unique identifier for LP position
+    signal input position_commitment;
+
+    // ============================================
+    // PRIVATE INPUTS
+    // ============================================
+    // Input note secrets
+    signal input secret_in;
+    signal input amount_in; // Total balance in input note
+    // Output note secrets
+    signal input secret_out;
+    signal input nullifier_out;
+    signal input amount_out; // Remaining balance after LP operation
+    // Merkle proof for input commitment
     signal input pathElements[depth];
     signal input pathIndices[depth];
     
-    // Verify input balance commitment: Mask(Hash(Mask(Hash(secret, nullifier)), total_balance_in))
+    // ============================================
+    // STEP 1: Verify input commitment structure
+    // commitment = Mask(Hash(Mask(Hash(secret, nullifier)), amount))
+    // ============================================
     component poseidon1 = Poseidon(2);
-    poseidon1.inputs[0] <== secret;
+    poseidon1.inputs[0] <== secret_in;
     poseidon1.inputs[1] <== nullifier;
 
     component mask1 = Mask250();
@@ -31,15 +54,18 @@ template LPOperation(depth) {
     
     component poseidon2 = Poseidon(2);
     poseidon2.inputs[0] <== mask1.out;
-    poseidon2.inputs[1] <== total_balance_in;
+    poseidon2.inputs[1] <== amount_in;
 
     component mask2 = Mask250();
     mask2.in <== poseidon2.out;
-    mask2.out === balance_commitment_in;
+    signal commitment_in;
+    commitment_in <== mask2.out;
     
-    // Verify Merkle membership of input balance
+    // ============================================
+    // STEP 2: Verify Merkle membership of input note
+    // ============================================
     component merkleTree = MerkleTreeChecker(depth);
-    merkleTree.leaf <== balance_commitment_in;
+    merkleTree.leaf <== commitment_in;
     merkleTree.root <== root;
     
     for (var i = 0; i < depth; i++) {
@@ -47,28 +73,80 @@ template LPOperation(depth) {
         merkleTree.pathIndices[i] <== pathIndices[i];
     }
     
-    // Check balance sufficiency
-    signal diff;
-    diff <== total_balance_in - liquidity_amount;
+    // ============================================
+    // STEP 3: Verify tick range is valid
+    // tick_lower < tick_upper
+    // ============================================
+    signal tick_diff;
+    tick_diff <== tick_upper - tick_lower;
     
-    component n2b = Num2Bits(252);
-    n2b.in <== diff; 
+    component n2b_tick = Num2Bits(252);
+    n2b_tick.in <== tick_diff;
+
+    // ============================================
+    // STEP 4: Verify balance sufficiency
+    // For mint: need enough balance to provide liquidity
+    // amount_in >= some_function(liquidity, tick_lower, tick_upper)
+    // Simplified: just check amount_in >= liquidity for MVP
+    // ============================================
+    signal balance_check;
+    balance_check <== amount_in - liquidity;
     
-    // Output commitment for remaining balance
+    component n2b_balance = Num2Bits(252);
+    n2b_balance.in <== balance_check;
+    
+    // ============================================
+    // STEP 5: Verify output commitment (change note)
+    // ============================================
     component poseidon3 = Poseidon(2);
-    poseidon3.inputs[0] <== secret; // User can reuse secret or use new one
-    poseidon3.inputs[1] <== nullifier + 1; // Simple nullifier evolution for MVP
+    poseidon3.inputs[0] <== secret_out;
+    poseidon3.inputs[1] <== nullifier_out;
 
     component mask3 = Mask250();
     mask3.in <== poseidon3.out;
     
     component poseidon4 = Poseidon(2);
     poseidon4.inputs[0] <== mask3.out;
-    poseidon4.inputs[1] <== diff;
+    poseidon4.inputs[1] <== amount_out;
 
     component mask4 = Mask250();
     mask4.in <== poseidon4.out;
-    mask4.out === balance_commitment_out;
+    
+    // Output commitment must match public input
+    mask4.out === new_commitment;
+
+    // ============================================
+    // STEP 6: Verify position commitment
+    // position_commitment uniquely identifies this LP position
+    // It's derived from secrets known only to the user
+    // ============================================
+    component poseidon5 = Poseidon(2);
+    poseidon5.inputs[0] <== secret_in;
+    poseidon5.inputs[1] <== tick_lower + tick_upper; // Include tick info
+
+    component mask5 = Mask250();
+    mask5.in <== poseidon5.out;
+    
+    // Position commitment must match public input
+    mask5.out === position_commitment;
+
+    // ============================================
+    // STEP 7: Verify amount conservation
+    // amount_out = amount_in - liquidity_cost
+    // Simplified for MVP: amount_out = amount_in - liquidity
+    // ============================================
+    amount_out === amount_in - liquidity;
 }
 
-component main {public [root, balance_commitment_in, balance_commitment_out, liquidity_amount]} = LPOperation(20);
+// Depth = 25 to match Cairo contract (TREE_DEPTH = 25)
+// Public inputs in order: nullifier, root, tick_lower, tick_upper,
+//                         liquidity, new_commitment, position_commitment
+component main {public [
+    nullifier,
+    root,
+    tick_lower,
+    tick_upper,
+    liquidity,
+    new_commitment,
+    position_commitment
+]} = LPOperation(25);

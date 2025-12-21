@@ -48,4 +48,5 @@ template Membership(depth) {
     }
 }
 
-component main {public [root, commitment]} = Membership(20);
+// Depth = 25 to match Cairo contract (TREE_DEPTH = 25)
+component main {public [root, commitment]} = Membership(25);

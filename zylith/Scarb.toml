@@ -6,7 +6,7 @@ edition = "2024_07"
 # See more keys and their definitions at https://docs.swmansion.com/scarb/docs/reference/manifest.html
 
 [dependencies]
-starknet = "2.11.4"
+starknet = "2.13.1"
 alexandria_math = "0.2.0"
 openzeppelin_account = "2.0.0"
 garaga = { git = "https://github.com/keep-starknet-strange/garaga.git", branch = "main" }
@@ -15,10 +15,15 @@ garaga = { git = "https://github.com/keep-starknet-strange/garaga.git", branch =
 
 [dev-dependencies]
 snforge_std = "0.50.0"
-assert_macros = "2.11.4"
+assert_macros = "2.13.1"
 
 [[target.starknet-contract]]
 sierra = true
+casm = true
+
+[profile.release]
+
+[profile.sepolia]
 
 [scripts]
 test = "snforge test"

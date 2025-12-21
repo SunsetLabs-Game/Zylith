@@ -7,7 +7,7 @@ use garaga::hashes::poseidon_hash_2_bn254;
 use starknet::storage::*;
 
 /// Merkle tree depth (adjustable for MVP)
-pub const TREE_DEPTH: u32 = 20;
+pub const TREE_DEPTH: u32 = 25;
 
 #[starknet::storage_node]
 pub struct MerkleTreeStorage {
@@ -16,7 +16,13 @@ pub struct MerkleTreeStorage {
     // Store leaves for reconstruction (in production, this would be off-chain)
     pub leaves: Map<u32, felt252>,
     // Store intermediate nodes for efficient root calculation
-    pub nodes: Map<(u32, u32), felt252> // (level, index) -> node hash
+    pub nodes: Map<(u32, u32), felt252>, // (level, index) -> node hash
+    // Historical root tracking - allows proofs against any previously valid root
+    // This is critical for UX: users can generate proofs against older roots
+    // and still have them accepted even if new deposits came in
+    pub known_roots: Map<felt252, bool>,
+    // Count of known roots (for diagnostics)
+    pub known_roots_count: u32,
 }
 
 // Merkle tree storage node definition

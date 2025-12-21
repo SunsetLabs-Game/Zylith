@@ -1,11 +1,13 @@
-use light_poseidon::{Poseidon, PoseidonHasher, bn254_parameters};
+use ark_bn254::Fr;
+use ark_ff::{BigInteger, PrimeField};
+use light_poseidon::{Poseidon, PoseidonHasher};
 use num_bigint::BigUint;
 use num_traits::Num;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Merkle Tree Depth (matches Cairo contract)
-pub const TREE_DEPTH: usize = 20;
+pub const TREE_DEPTH: usize = 25;
 
 /// Mask used in Cairo contract to ensure BN254 hash fits in felt252
 /// 0x3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff (250 bits)
@@ -19,12 +21,18 @@ pub struct MerkleProof {
     pub root: String,
 }
 
+/// Merkle Tree with proper intermediate node storage for correct proof generation
 pub struct MerkleTree {
     pub depth: usize,
     pub next_index: u32,
-    pub leaves: HashMap<u32, BigUint>,
-    pub filled_subtrees: Vec<BigUint>,
+    /// Store all nodes at all levels: nodes[(level, index)] = hash
+    /// Level 0 = leaves, Level depth = root
+    pub nodes: HashMap<(usize, u32), BigUint>,
+    /// Pre-computed zeros for each level (used for empty siblings)
     pub zeros: Vec<BigUint>,
+    /// Current root (updated on each insert)
+    pub current_root: BigUint,
+    /// Mask for BN254 -> felt252 conversion
     pub mask: BigUint,
 }
 
@@ -35,129 +43,208 @@ impl MerkleTree {
         let mut current_zero = BigUint::from(0u8);
         zeros.push(current_zero.clone());
 
-        let mut hasher = PoseidonHasher::new(bn254_parameters());
-
+        // Pre-compute zeros for each level: zero[i] = hash(zero[i-1], zero[i-1])
         for _ in 0..depth {
-            let hash_input = vec![current_zero.clone(), current_zero.clone()];
-            // Replicate Cairo logic: hash then mask
-            current_zero = Self::hash_and_mask(&mut hasher, &hash_input, &mask);
+            current_zero = Self::hash_and_mask(&[current_zero.clone(), current_zero.clone()], &mask);
             zeros.push(current_zero.clone());
         }
+
+        // Initial root is zeros[depth] (empty tree root)
+        let initial_root = zeros[depth].clone();
 
         Self {
             depth,
             next_index: 0,
-            leaves: HashMap::new(),
-            filled_subtrees: zeros[..depth].to_vec(),
+            nodes: HashMap::new(),
             zeros,
+            current_root: initial_root,
             mask,
         }
     }
 
+    /// Insert a leaf and update the tree, returning the new root
     pub fn insert(&mut self, leaf: BigUint) -> BigUint {
         let index = self.next_index;
-        self.leaves.insert(index, leaf.clone());
         self.next_index += 1;
 
+        // Store leaf at level 0
+        self.nodes.insert((0, index), leaf.clone());
+
+        // Update path from leaf to root
         let mut current_hash = leaf;
-        let mut i = index;
-        let mut hasher = PoseidonHasher::new(bn254_parameters());
+        let mut current_idx = index;
 
         for level in 0..self.depth {
-            let left;
-            let right;
-            if i % 2 == 1 {
-                left = self.filled_subtrees[level].clone();
-                right = current_hash;
+            // Determine left and right children for current position
+            let (left, right) = if current_idx % 2 == 0 {
+                // Current node is left child
+                let right_idx = current_idx + 1;
+                let right = self
+                    .nodes
+                    .get(&(level, right_idx))
+                    .cloned()
+                    .unwrap_or_else(|| self.zeros[level].clone());
+                (current_hash.clone(), right)
             } else {
-                self.filled_subtrees[level] = current_hash.clone();
-                left = current_hash;
-                right = self.zeros[level].clone();
-            }
-            current_hash = Self::hash_and_mask(&mut hasher, &vec![left, right], &self.mask);
-            i /= 2;
+                // Current node is right child
+                let left_idx = current_idx - 1;
+                let left = self
+                    .nodes
+                    .get(&(level, left_idx))
+                    .cloned()
+                    .unwrap_or_else(|| self.zeros[level].clone());
+                (left, current_hash.clone())
+            };
+
+            // Compute parent hash
+            current_hash = Self::hash_and_mask(&[left, right], &self.mask);
+
+            // Move to parent level
+            let parent_idx = current_idx / 2;
+            self.nodes.insert((level + 1, parent_idx), current_hash.clone());
+            current_idx = parent_idx;
         }
 
-        current_hash // New root
+        self.current_root = current_hash.clone();
+        current_hash
     }
 
-    fn hash_and_mask(hasher: &mut PoseidonHasher, inputs: &[BigUint], mask: &BigUint) -> BigUint {
-        // Convert BigUint to field elements (bytes)
-        let input_frs: Vec<[u8; 32]> = inputs.iter().map(|item| {
-            let bytes = item.to_bytes_le();
-            let mut buf = [0u8; 32];
-            buf[..bytes.len()].copy_from_slice(&bytes);
-            buf
-        }).collect();
+    /// Generate a Merkle proof for a leaf at the given index
+    pub fn get_proof(&self, index: u32) -> Option<MerkleProof> {
+        // Check if leaf exists
+        let leaf = self.nodes.get(&(0, index))?;
 
-        // Light-poseidon expects specific types or byte arrays depending on version
-        // For BN254 hash 2:
-        let result = hasher.hash(&input_frs).unwrap();
-        let result_bu = BigUint::from_bytes_le(&result);
-        
-        // Apply masking as in Cairo
-        result_bu & mask
-    }
-
-    pub fn get_proof(&self, index: u32) -> MerkleProof {
-        let mut path = Vec::new();
-        let mut path_indices = Vec::new();
-        let mut i = index;
-        
-        // Note: For full reconstruction in MVP, a simpler approach is to use the full leaf set
-        // or maintain all intermediate nodes.
-        // For now, let's assume we can reconstruct it from the leaves map.
-        
-        let mut current_level_leaves = self.leaves.clone();
-        let mut idx = index;
-        let mut hasher = PoseidonHasher::new(bn254_parameters());
+        let mut path = Vec::with_capacity(self.depth);
+        let mut path_indices = Vec::with_capacity(self.depth);
+        let mut current_idx = index;
 
         for level in 0..self.depth {
-            let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
-            path_indices.push(idx % 2);
+            // Determine sibling index
+            let sibling_idx = if current_idx % 2 == 0 {
+                current_idx + 1
+            } else {
+                current_idx - 1
+            };
+
+            // Path index: 0 if current is left (sibling on right), 1 if current is right (sibling on left)
+            path_indices.push((current_idx % 2) as u32);
             
-            let sibling = current_level_leaves.get(&sibling_idx)
+            // Get sibling (use zero if not present)
+            let sibling = self
+                .nodes
+                .get(&(level, sibling_idx))
                 .cloned()
                 .unwrap_or_else(|| self.zeros[level].clone());
             
             path.push(format!("0x{:x}", sibling));
             
-            // Move to next level (recalculating intermediate nodes isn't ideal but works for small depth)
-            // In production, the ASP would store all levels.
-            idx /= 2;
+            // Move to parent
+            current_idx /= 2;
         }
 
-        MerkleProof {
-            leaf: format!("0x{:x}", self.leaves.get(&index).unwrap()),
+        Some(MerkleProof {
+            leaf: format!("0x{:x}", leaf),
             path,
             path_indices,
-            root: format!("0x{:x}", self.get_root()),
-        }
+            root: format!("0x{:x}", self.current_root),
+        })
     }
 
+    /// Get the current root
     pub fn get_root(&self) -> BigUint {
-        // Find highest level available or just recalculate (placeholder)
-        // A better way is to keep the last inserted root
-        self.calculate_root()
+        self.current_root.clone()
     }
 
-    fn calculate_root(&self) -> BigUint {
-        let mut nodes = self.leaves.clone();
-        let mut hasher = PoseidonHasher::new(bn254_parameters());
-        let mut current_level_size = (1 << self.depth);
-        let mut current_index_limit = self.next_index;
+    /// Get number of leaves inserted
+    pub fn get_leaf_count(&self) -> u32 {
+        self.next_index
+    }
 
-        for level in 0..self.depth {
-            let mut next_level_nodes = HashMap::new();
-            for i in 0..(current_index_limit + 1) / 2 {
-                let left = nodes.get(&(2 * i)).cloned().unwrap_or_else(|| self.zeros[level].clone());
-                let right = nodes.get(&(2 * i + 1)).cloned().unwrap_or_else(|| self.zeros[level].clone());
-                let hash = Self::hash_and_mask(&mut hasher, &[left, right], &self.mask);
-                next_level_nodes.insert(i, hash);
-            }
-            nodes = next_level_nodes;
-            current_index_limit = (current_index_limit + 1) / 2;
+    /// Hash two nodes using Poseidon BN254 and mask to felt252
+    fn hash_and_mask(inputs: &[BigUint], mask: &BigUint) -> BigUint {
+        // Convert BigUint to Fr field elements
+        let input_frs: Vec<Fr> = inputs
+            .iter()
+            .map(|item| {
+                let bytes = item.to_bytes_be();
+                let mut buf = [0u8; 32];
+                let len = bytes.len().min(32);
+                buf[32 - len..].copy_from_slice(&bytes[bytes.len() - len..]);
+                Fr::from_be_bytes_mod_order(&buf)
+            })
+            .collect();
+
+        // Create Poseidon hasher for 2 inputs
+        let mut poseidon = Poseidon::<Fr>::new_circom(2).unwrap();
+
+        // Hash the inputs
+        let result = poseidon.hash(&input_frs).unwrap();
+
+        // Convert result back to BigUint
+        let result_bytes = result.into_bigint().to_bytes_be();
+        let result_bu = BigUint::from_bytes_be(&result_bytes);
+
+        // Apply masking as in Cairo
+        result_bu & mask
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_tree() {
+        let tree = MerkleTree::new(TREE_DEPTH);
+        assert_eq!(tree.get_leaf_count(), 0);
+        // Empty tree root should be zeros[depth]
+        assert_eq!(tree.get_root(), tree.zeros[TREE_DEPTH]);
+    }
+
+    #[test]
+    fn test_insert_and_proof() {
+        let mut tree = MerkleTree::new(TREE_DEPTH);
+
+        // Insert some leaves
+        let leaf1 = BigUint::from(12345u64);
+        let leaf2 = BigUint::from(67890u64);
+
+        let root1 = tree.insert(leaf1.clone());
+        assert_eq!(tree.get_leaf_count(), 1);
+
+        let root2 = tree.insert(leaf2.clone());
+        assert_eq!(tree.get_leaf_count(), 2);
+        assert_ne!(root1, root2);
+
+        // Get proof for first leaf
+        let proof = tree.get_proof(0).expect("Proof should exist");
+        assert_eq!(proof.leaf, format!("0x{:x}", leaf1));
+        assert_eq!(proof.path.len(), TREE_DEPTH);
+        assert_eq!(proof.path_indices.len(), TREE_DEPTH);
+    }
+
+    #[test]
+    fn test_proof_verification() {
+        let mut tree = MerkleTree::new(4); // Smaller tree for testing
+        let mask = BigUint::from_str_radix(MASK, 16).unwrap();
+
+        let leaf = BigUint::from(12345u64);
+        let _root = tree.insert(leaf.clone());
+
+        let proof = tree.get_proof(0).expect("Proof should exist");
+
+        // Manually verify the proof
+        let mut current_hash = leaf;
+        for (i, sibling_str) in proof.path.iter().enumerate() {
+            let sibling = BigUint::from_str_radix(&sibling_str[2..], 16).unwrap();
+            let (left, right) = if proof.path_indices[i] == 0 {
+                (current_hash.clone(), sibling)
+            } else {
+                (sibling, current_hash.clone())
+            };
+            current_hash = MerkleTree::hash_and_mask(&[left, right], &mask);
         }
-        nodes.get(&0).cloned().unwrap_or_else(|| self.zeros[self.depth].clone())
+
+        assert_eq!(format!("0x{:x}", current_hash), proof.root);
     }
 }

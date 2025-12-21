@@ -3,7 +3,7 @@
 use super::groth16_verifier_constants::{N_PUBLIC_INPUTS, vk, ic, precomputed_lines};
 
 #[starknet::interface]
-pub trait IGroth16VerifierBN254<TContractState> {
+pub trait ISwapGroth16VerifierBN254<TContractState> {
     fn verify_groth16_proof_bn254(
         self: @TContractState,
         full_proof_with_hints: Span<felt252>,
@@ -11,7 +11,7 @@ pub trait IGroth16VerifierBN254<TContractState> {
 }
 
 #[starknet::contract]
-mod Groth16VerifierBN254 {
+mod SwapGroth16VerifierBN254 {
     use starknet::SyscallResultTrait;
     use garaga::definitions::{G1Point, G1G2Pair};
     use garaga::groth16::{multi_pairing_check_bn254_3P_2F_with_extra_miller_loop_result, Groth16ProofRawTrait};
@@ -25,7 +25,7 @@ mod Groth16VerifierBN254 {
     struct Storage {}
 
     #[abi(embed_v0)]
-    impl IGroth16VerifierBN254 of super::IGroth16VerifierBN254<ContractState> {
+    impl ISwapGroth16VerifierBN254 of super::ISwapGroth16VerifierBN254<ContractState> {
         fn verify_groth16_proof_bn254(
             self: @ContractState,
             full_proof_with_hints: Span<felt252>,
