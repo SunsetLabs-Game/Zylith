@@ -1,17 +1,48 @@
 # Tools and Technologies Reference
 
-This document provides a comprehensive overview of the key tools, frameworks, and technologies used in the Zylith Protocol, with important points and references for each.
+**Version**: 1.0
+**Last Updated**: December 2025
+
+This document provides a comprehensive technical reference for the tools, frameworks, and technologies used in the Zylith Protocol.
 
 ---
 
 ## Table of Contents
 
-1. [Cairo & Starknet](#cairo--starknet)
-2. [Garaga - ZK Proof Verification](#garaga---zk-proof-verification)
-3. [Circom - Circuit Language](#circom---circuit-language)
-4. [Noir - Alternative Circuit Language](#noir---alternative-circuit-language)
-5. [Supporting Tools](#supporting-tools)
-6. [Development Environment](#development-environment)
+1. [Technology Stack Overview](#technology-stack-overview)
+2. [Cairo & Starknet](#cairo--starknet)
+3. [Garaga - ZK Proof Verification](#garaga---zk-proof-verification)
+4. [Circom - Circuit Language](#circom---circuit-language)
+5. [Noir - Alternative Circuit Language](#noir---alternative-circuit-language)
+6. [Supporting Tools](#supporting-tools)
+7. [Development Environment](#development-environment)
+
+---
+
+## Technology Stack Overview
+
+### Core Technologies
+
+| Component | Technology | Version | Purpose |
+|-----------|-----------|---------|---------|
+| **Smart Contracts** | Cairo | 2024_07 | Contract development on Starknet |
+| **Blockchain Platform** | Starknet | 2.11.4+ | Layer 2 scaling solution |
+| **Package Manager** | Scarb | Latest | Cairo package management |
+| **Testing Framework** | Starknet Foundry | 0.50.0+ | Contract testing |
+| **ZK Circuits** | Circom | 2.1.0+ | Zero-knowledge circuit design |
+| **Proof Generation** | snarkjs | 0.7.0+ | Groth16 proof generation |
+| **Proof Verification** | Garaga | 0.18.2+ | On-chain verification |
+| **ASP Server** | Rust/Axum | Latest | Off-chain indexing service |
+
+### Technology Selection Rationale
+
+| Technology | Selected Over | Rationale |
+|------------|--------------|-----------|
+| **Cairo** | Solidity | Native Starknet support, provable computation |
+| **Groth16** | PLONK/STARKs | Smaller proofs, faster verification on-chain |
+| **Circom** | Noir | Mature ecosystem, Garaga compatibility |
+| **Poseidon BN254** | SHA256 | ZK-friendly, efficient in circuits |
+| **Starknet** | Ethereum L1 | Lower costs, native Cairo support |
 
 ---
 
@@ -1014,53 +1045,157 @@ nargo info --show-ssa
 
 ## Quick Reference Commands
 
-```bash
-# Cairo Development
-scarb build                    # Compile
-scarb test                     # Test
-snforge test                   # Alternative test
+### Cairo Development
 
-# Circuit Development (Circom)
-circom circuit.circom --r1cs   # Compile
-snarkjs groth16 prove ...      # Generate proof
+| Command | Purpose | Usage Context |
+|---------|---------|---------------|
+| `scarb build` | Compile contracts | After code changes |
+| `scarb test` | Run all tests | Pre-commit validation |
+| `snforge test` | Alternative test runner | Detailed test output |
+| `snforge test <name>` | Run specific test | Targeted debugging |
+| `scarb clean` | Clean build artifacts | Fresh compilation |
 
-# Circuit Development (Noir)
-nargo compile                  # Compile
-nargo prove                    # Generate proof
-nargo verify                   # Verify proof
+### Circuit Development (Circom)
 
-# Garaga
-garaga gen groth16 vk.json     # Generate verifier
+| Command | Purpose | Output |
+|---------|---------|--------|
+| `circom circuit.circom --r1cs --wasm` | Compile circuit | R1CS + WASM |
+| `snarkjs powersoftau new bn128 14 pot.ptau` | Start ceremony | Powers of tau |
+| `snarkjs groth16 setup circuit.r1cs pot.ptau circuit.zkey` | Circuit setup | Proving key |
+| `snarkjs groth16 prove circuit.zkey witness.wtns proof.json public.json` | Generate proof | Proof + public inputs |
+| `snarkjs groth16 verify vk.json public.json proof.json` | Verify proof | Boolean result |
 
-# Git
-git status                     # Check status
-git add .                      # Stage changes
-git commit -m "message"        # Commit
-git push                       # Push changes
-```
+### Circuit Development (Noir)
+
+| Command | Purpose | Output |
+|---------|---------|--------|
+| `nargo new <project>` | Create project | New Noir project |
+| `nargo compile` | Compile circuit | Circuit artifacts |
+| `nargo prove` | Generate proof | proof.json |
+| `nargo verify` | Verify proof | Boolean result |
+| `nargo test` | Run tests | Test results |
+
+### Garaga Integration
+
+| Command | Purpose | Output |
+|---------|---------|--------|
+| `garaga gen groth16 vk.json` | Generate verifier | Cairo verifier contract |
+| `garaga --version` | Check version | Version number |
+
+### Version Control
+
+| Command | Purpose | When to Use |
+|---------|---------|-------------|
+| `git status` | Check repository state | Before commits |
+| `git add .` | Stage all changes | Before commit |
+| `git commit -m "message"` | Create commit | After testing |
+| `git push` | Push to remote | After local commits |
+| `git checkout -b <branch>` | Create branch | New features |
 
 ---
 
 ## Additional Resources
 
-**Official Documentation**
-- Cairo: https://www.starknet.io/cairo-book/
-- Garaga: https://garaga.gitbook.io/garaga
-- Circom: https://docs.circom.io
-- Noir: https://noir-lang.org/docs/
+### Official Documentation
 
-**Community**
-- Starknet Ecosystem: https://www.starknet.io/ecosystem
-- ZK Learning Resources: https://zkp.science
-- Awesome Starknet: https://github.com/gakonst/awesome-starknet
-- Awesome ZK: https://github.com/matter-labs/awesome-zero-knowledge-proofs
+| Resource | URL | Focus Area |
+|----------|-----|------------|
+| **Cairo Book** | https://www.starknet.io/cairo-book/ | Language fundamentals |
+| **Starknet Docs** | https://docs.starknet.io/ | Platform guide |
+| **Garaga** | https://garaga.gitbook.io/garaga | ZK verification |
+| **Circom** | https://docs.circom.io | Circuit development |
+| **Noir** | https://noir-lang.org/docs/ | Alternative circuits |
 
-**Research Papers**
-- Groth16: "On the Size of Pairing-Based Non-interactive Arguments"
-- PLONK: "PLONK: Permutations over Lagrange-bases for Oecumenical Noninteractive arguments of Knowledge"
-- Poseidon: "Poseidon: A New Hash Function for Zero-Knowledge Proof Systems"
+### Community Resources
+
+| Platform | URL | Purpose |
+|----------|-----|---------|
+| **Starknet Ecosystem** | https://www.starknet.io/ecosystem | Projects & tools |
+| **ZK Learning** | https://zkp.science | Educational content |
+| **Awesome Starknet** | https://github.com/gakonst/awesome-starknet | Curated resources |
+| **Awesome ZK** | https://github.com/matter-labs/awesome-zero-knowledge-proofs | ZK resources |
+
+### Research Papers
+
+| Paper | Authors | Topic | Relevance |
+|-------|---------|-------|-----------|
+| **On the Size of Pairing-Based Non-interactive Arguments** | Jens Groth (2016) | Groth16 | Proof system used |
+| **PLONK** | Gabizon, Williamson, Ciobotaru (2019) | Universal SNARKs | Alternative proof system |
+| **Poseidon** | Grassi et al. (2021) | Hash functions | ZK-friendly hashing |
+| **Privacy Pools** | Buterin et al. (2023) | Privacy design | Architecture pattern |
 
 ---
 
-*Last Updated: December 2024*
-*Maintained by: Zylith Protocol Team*
+## Troubleshooting Guide
+
+### Common Issues
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| **Type mismatch in Cairo** | Incorrect felt252/u128 conversion | Check conversion bounds |
+| **Garaga verification key format** | Wrong curve or export | Use BN254, check snarkjs export |
+| **Circuit under-constrained** | Missing constraints | Use `<==` instead of `<--` |
+| **Witness generation failed** | Input format mismatch | Validate input.json structure |
+| **Scarb build error** | Dependency conflicts | Check Scarb.toml versions |
+
+### Debug Commands
+
+| Tool | Command | Purpose |
+|------|---------|---------|
+| **Cairo** | `scarb build --verbose` | Detailed build output |
+| **Circom** | `circom --O0 --verbose` | Debug circuit compilation |
+| **Noir** | `nargo execute --show-output` | Debug execution |
+| **snarkjs** | `snarkjs r1cs print circuit.r1cs` | Inspect constraints |
+
+---
+
+## Version Compatibility
+
+### Current Versions
+
+| Tool | Version | Release Date | Compatibility |
+|------|---------|-------------|---------------|
+| **Cairo** | 2024_07 | Q3 2024 | Starknet 2.11.4+ |
+| **Scarb** | Latest stable | Rolling | Cairo 2024_07 |
+| **Starknet Foundry** | 0.50.0 | 2024 | Cairo 2024_07 |
+| **Garaga** | 0.18.2+ | 2024 | Cairo 2.x, BN254 |
+| **Circom** | 2.1.0+ | 2023 | snarkjs 0.7+ |
+| **snarkjs** | 0.7.0+ | 2023 | Circom 2.x |
+| **Noir** | Latest | Rolling | Nargo CLI |
+
+### Upgrade Path
+
+| From | To | Breaking Changes | Migration Guide |
+|------|----|--------------------|----------------|
+| Cairo 2023_11 | Cairo 2024_07 | Storage model changes | Update storage macros |
+| Garaga 0.17.x | Garaga 0.18.x | API changes | Check release notes |
+| Circom 2.0.x | Circom 2.1.x | Minor syntax | Update pragma |
+
+---
+
+## Performance Benchmarks
+
+### Proof Generation Times
+
+| Circuit | Constraints | Generation Time | Verification Time |
+|---------|------------|-----------------|-------------------|
+| **Membership** | ~1,000 | 1-2s | 1-2M gas |
+| **Swap** | ~5,000 | 5-10s | 1.5-2M gas |
+| **Withdraw** | ~2,000 | 2-5s | 1.5-2M gas |
+| **LP Operations** | ~3,000 | 3-7s | 1.5-2M gas |
+
+### Hardware Requirements
+
+| Component | Minimum | Recommended | Purpose |
+|-----------|---------|-------------|---------|
+| **CPU** | 2 cores | 4+ cores | Proof generation |
+| **RAM** | 4GB | 8GB+ | Circuit compilation |
+| **Storage** | 50GB SSD | 200GB SSD | Build artifacts |
+| **Network** | 10 Mbps | 100 Mbps | RPC calls |
+
+---
+
+**Version**: 1.0
+**Last Updated**: December 2025
+**Maintained By**: Zylith Protocol Team
+**Next Review**: January 2026
