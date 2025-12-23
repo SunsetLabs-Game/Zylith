@@ -26,7 +26,7 @@ pub trait IZylith<TContractState> {
         amount: u128,
     );
 
-    fn private_mint(
+    fn private_mint_liquidity(
         ref self: TContractState,
         proof: Array<felt252>,
         public_inputs: Array<felt252>,
@@ -36,7 +36,7 @@ pub trait IZylith<TContractState> {
         new_commitment: felt252,
     ) -> (u128, u128);
 
-    fn private_burn(
+    fn private_burn_liquidity(
         ref self: TContractState,
         proof: Array<felt252>,
         public_inputs: Array<felt252>,

@@ -20,10 +20,10 @@ pub mod Zylith {
     };
 
     // Import the Groth16 verifiers directly
-    use crate::privacy::verifiers::membership::groth16_verifier::{
-        IMembershipGroth16VerifierBN254Dispatcher as IMembershipVerifier,
-        IMembershipGroth16VerifierBN254DispatcherTrait as IMembershipVerifierTrait,
-    };
+    // use crate::privacy::verifiers::membership::groth16_verifier::{
+    //     IMembershipGroth16VerifierBN254Dispatcher as IMembershipVerifier,
+    //     IMembershipGroth16VerifierBN254DispatcherTrait as IMembershipVerifierTrait,
+    // };
     use crate::privacy::verifiers::swap::groth16_verifier::{
         ISwapGroth16VerifierBN254Dispatcher as ISwapVerifier,
         ISwapGroth16VerifierBN254DispatcherTrait as ISwapVerifierTrait,
@@ -60,7 +60,6 @@ pub mod Zylith {
         PoolEvent: PoolEvent,
         PrivacyEvent: zylith::privacy::deposit::PrivacyEvent,
         Initialized: Initialized,
-        ProofVerified: ProofVerified,
         ProofRejected: ProofRejected,
     }
 
@@ -71,13 +70,6 @@ pub mod Zylith {
         pub fee: u128,
         pub tick_spacing: i32,
         pub sqrt_price_x128: u256,
-    }
-
-    #[derive(Drop, starknet::Event)]
-    pub struct ProofVerified {
-        pub proof_type: felt252,
-        pub caller: ContractAddress,
-        pub timestamp: u64,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -188,7 +180,22 @@ pub mod Zylith {
             // Step 1 - Verify ZK proof using Garaga verifier
             let swap_verifier_addr = self.swap_verifier.read();
             let verifier = ISwapVerifier { contract_address: swap_verifier_addr };
-            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+            let result = verifier.verify_groth16_proof_bn254(proof.span());
+
+            let _verified_inputs = match result {
+                Result::Ok(v) => v,
+                Result::Err(err) => {
+                    self
+                        .emit(
+                            Event::ProofRejected(
+                                ProofRejected {
+                                    proof_type: 'SWAP', caller: get_caller_address(), error: err,
+                                },
+                            ),
+                        );
+                    panic!()
+                },
+            };
 
             // Step 2 - Extract verified values from ZK proof
             // Verified inputs layout (swap circuit - includes swap transition outputs):
@@ -202,6 +209,7 @@ pub mod Zylith {
             // 7: expected_new_sqrt_price_x128 (u256)
             // 8: expected_new_tick (i32 as u256)
             assert(_verified_inputs.len() >= 9, 'INVALID_VERIFIED_INPUTS_LEN');
+            assert(_verified_inputs.len() == public_inputs.len(), ' PUBLIC_INPUT_MISMATCH ');
 
             let verified_nullifier: felt252 = (*_verified_inputs.at(0)).try_into().unwrap();
             let verified_root: felt252 = (*_verified_inputs.at(1)).try_into().unwrap();
@@ -275,7 +283,24 @@ pub mod Zylith {
             // Step 1 - Verify ZK proof using Garaga verifier
             let withdraw_verifier_addr = self.withdraw_verifier.read();
             let verifier = IWithdrawVerifier { contract_address: withdraw_verifier_addr };
-            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+            let result = verifier.verify_groth16_proof_bn254(proof.span());
+
+            let _verified_inputs = match result {
+                Result::Ok(v) => v,
+                Result::Err(err) => {
+                    self
+                        .emit(
+                            Event::ProofRejected(
+                                ProofRejected {
+                                    proof_type: 'WITHDRAW',
+                                    caller: get_caller_address(),
+                                    error: err,
+                                },
+                            ),
+                        );
+                    panic!();
+                },
+            };
 
             // Step 2 - Use verified values from ZK proof
             // 0: nullifier
@@ -333,7 +358,7 @@ pub mod Zylith {
         /// Private mint - add liquidity with ZK proof verification
         /// The proof verifies ownership of a commitment with sufficient balance
         /// Tick ranges remain public in MVP (bounds privacy deferred)
-        fn private_mint(
+        fn private_mint_liquidity(
             ref self: ContractState,
             proof: Array<felt252>,
             public_inputs: Array<felt252>,
@@ -345,7 +370,22 @@ pub mod Zylith {
             // Step 1 - Verify ZK proof using Garaga LP verifier
             let lp_verifier_addr = self.lp_verifier.read();
             let verifier = ILPVerifier { contract_address: lp_verifier_addr };
-            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+            let result = verifier.verify_groth16_proof_bn254(proof.span());
+
+            let _verified_inputs = match result {
+                Result::Ok(v) => v,
+                Result::Err(err) => {
+                    self
+                        .emit(
+                            Event::ProofRejected(
+                                ProofRejected {
+                                    proof_type: 'MINT', caller: get_caller_address(), error: err,
+                                },
+                            ),
+                        );
+                    panic!();
+                },
+            };
 
             // Step 2 - Extract verified values from ZK proof
             // Expected public inputs from LP circuit:
@@ -463,7 +503,7 @@ pub mod Zylith {
         }
 
         /// Private burn - remove liquidity with ZK proof verification
-        fn private_burn(
+        fn private_burn_liquidity(
             ref self: ContractState,
             proof: Array<felt252>,
             public_inputs: Array<felt252>,
@@ -475,7 +515,22 @@ pub mod Zylith {
             // Step 1 - Verify ZK proof using Garaga LP verifier
             let lp_verifier_addr = self.lp_verifier.read();
             let verifier = ILPVerifier { contract_address: lp_verifier_addr };
-            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+            let result = verifier.verify_groth16_proof_bn254(proof.span());
+
+            let _verified_inputs = match result {
+                Result::Ok(v) => v,
+                Result::Err(err) => {
+                    self
+                        .emit(
+                            Event::ProofRejected(
+                                ProofRejected {
+                                    proof_type: 'BURN', caller: get_caller_address(), error: err,
+                                },
+                            ),
+                        );
+                    panic!();
+                },
+            };
 
             // Step 2 - Extract verified values from ZK proof
             // Expected public inputs:
@@ -1092,7 +1147,22 @@ pub mod Zylith {
             // Step 1 - Verify ZK proof using Garaga LP verifier
             let lp_verifier_addr = self.lp_verifier.read();
             let verifier = ILPVerifier { contract_address: lp_verifier_addr };
-            let _verified_inputs = verifier.verify_groth16_proof_bn254(proof.span()).unwrap();
+            let result = verifier.verify_groth16_proof_bn254(proof.span());
+
+            let _verified_inputs = match result {
+                Result::Ok(v) => v,
+                Result::Err(err) => {
+                    self
+                        .emit(
+                            Event::ProofRejected(
+                                ProofRejected {
+                                    proof_type: 'LP', caller: get_caller_address(), error: err,
+                                },
+                            ),
+                        );
+                    panic!();
+                },
+            };
 
             // Step 2 - Extract verified values from ZK proof
             // Expected public inputs for private_collect:
@@ -2006,113 +2076,6 @@ pub mod Zylith {
                 i = i + 1;
             }
             zylith::privacy::merkle_tree::calculate_root_from_leaves(leaves)
-        }
-
-        fn verify_membership_proof(
-            ref self: ContractState, full_proof_with_hints: Span<felt252>,
-        ) -> bool {
-            let verifier_address = self.membership_verifier.read();
-            let verifier = IMembershipVerifier { contract_address: verifier_address };
-
-            // calling verifier
-            let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);
-
-            match result {
-                Result::Ok(_public_inputs) => {
-                    // if proof is valid !!
-
-                    self
-                        .emit(
-                            ProofVerified {
-                                proof_type: 'membership',
-                                caller: get_caller_address(),
-                                timestamp: starknet::get_block_timestamp(),
-                            },
-                        );
-
-                    true
-                },
-                Result::Err(error) => {
-                    // if Proof is invalid !
-                    self
-                        .emit(
-                            ProofRejected {
-                                proof_type: 'membership',
-                                caller: get_caller_address(),
-                                error: error,
-                            },
-                        );
-                    false
-                },
-            }
-        }
-
-        fn verify_swap_proof(
-            ref self: ContractState, full_proof_with_hints: Span<felt252>,
-        ) -> bool {
-            let verifier_address = self.swap_verifier.read();
-            let verifier = ISwapVerifier { contract_address: verifier_address };
-
-            let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);
-
-            match result {
-                Result::Ok(_public_inputs) => {
-                    self
-                        .emit(
-                            ProofVerified {
-                                proof_type: 'swap',
-                                caller: get_caller_address(),
-                                timestamp: starknet::get_block_timestamp(),
-                            },
-                        );
-
-                    true
-                },
-                Result::Err(error) => {
-                    self
-                        .emit(
-                            ProofRejected {
-                                proof_type: 'swap', caller: get_caller_address(), error: error,
-                            },
-                        );
-
-                    false
-                },
-            }
-        }
-
-        fn verify_withdraw_proof(
-            ref self: ContractState, full_proof_with_hints: Span<felt252>,
-        ) -> bool {
-            let verifier_address = self.withdraw_verifier.read();
-            let verifier = IWithdrawVerifier { contract_address: verifier_address };
-
-            let result = verifier.verify_groth16_proof_bn254(full_proof_with_hints);
-
-            match result {
-                Result::Ok(_public_inputs) => {
-                    self
-                        .emit(
-                            ProofVerified {
-                                proof_type: 'withdraw',
-                                caller: get_caller_address(),
-                                timestamp: starknet::get_block_timestamp(),
-                            },
-                        );
-
-                    true
-                },
-                Result::Err(error) => {
-                    self
-                        .emit(
-                            ProofRejected {
-                                proof_type: 'withdraw', caller: get_caller_address(), error: error,
-                            },
-                        );
-
-                    false
-                },
-            }
         }
     }
 }

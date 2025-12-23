@@ -327,3 +327,4 @@ fn test_historical_root_accepted() {
 // Note: Full proof generation with depth=25 takes significant time (~minutes)
 // Consider using depth=10 for rapid testing during development
 
+
