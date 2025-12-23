@@ -1,17 +1,14 @@
-
 use core::array::ArrayTrait;
 use core::integer::u128;
 use core::num::traits::Zero;
 use core::traits::TryInto;
 use snforge_std::{
-    ContractClassTrait, DeclareResultTrait, 
-    declare,  start_cheat_caller_address, stop_cheat_caller_address,
+    ContractClassTrait, DeclareResultTrait, declare, start_cheat_caller_address,
+    stop_cheat_caller_address,
 };
 use starknet::ContractAddress;
-use zylith::clmm::math;
 use zylith::interfaces::izylith::{IZylithDispatcher, IZylithDispatcherTrait};
 use zylith::mocks::erc20::{IMockERC20Dispatcher, IMockERC20DispatcherTrait};
-use zylith::privacy::commitment;
 
 // Test constants
 const INITIAL_BALANCE: u256 = 1000000000000000000000000; // 1M tokens
@@ -28,7 +25,7 @@ fn user2() -> ContractAddress {
     0x456.try_into().unwrap()
 }
 
-//  this is mock 
+//  this is mock
 fn deploy_mock_erc20(name: felt252, symbol: felt252) -> IMockERC20Dispatcher {
     let contract = declare("MockERC20").unwrap().contract_class();
     let mut constructor_args = array![];
@@ -117,7 +114,7 @@ fn initialize_pool(setup: @TestSetup) {
 }
 
 // ============================================================================
-// UNIT TESTS - Constructor & Initialization
+//  Constructor & Initialization
 // ============================================================================
 
 #[test]

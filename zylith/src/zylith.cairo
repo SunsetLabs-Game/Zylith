@@ -90,11 +90,12 @@ pub mod Zylith {
     ) {
         // Use deployment version to ensure unique class hash
         self.owner.write(owner);
+        self.initialized.write(false);
+
         self.membership_verifier.write(membership_verifier);
         self.swap_verifier.write(swap_verifier);
         self.withdraw_verifier.write(withdraw_verifier);
         self.lp_verifier.write(lp_verifier);
-        self.initialized.write(false);
     }
 
     #[abi(embed_v0)]

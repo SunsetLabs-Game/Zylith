@@ -4,13 +4,16 @@
 ### Deployment
 
 * **Contract Address:**
-  `0x031b5bd7f4c436b53b17113028a3c3b903c928f5dad9dd80d34b425cf084c4c3`
+  `0x04b6a594dc9747caf1bd3d8933621366bbb7fbaefa1522174432611b577ae94d`
+* **Class Hash:**
+  `0xb06170a184703d5216e4b29e81003869f0b6d8507566158ba0169170dfbb3e`
 * **Transaction:**
-  `0x022f42eb66f4fa92beb77a9bd5ad4aea41dc859d6555addcb176be76531fc8e5`
+  `0x04347f7cfe206498ee0b389415d1c4b36c2dd98be39a52c999318fed08472fb9`
 * **Explorer:**
 
-  * Contract: [https://sepolia.starkscan.co/contract/0x031b5bd7f4c436b53b17113028a3c3b903c928f5dad9dd80d34b425cf084c4c3](https://sepolia.starkscan.co/contract/0x031b5bd7f4c436b53b17113028a3c3b903c928f5dad9dd80d34b425cf084c4c3)
-  * Transaction: [https://sepolia.starkscan.co/tx/0x022f42eb66f4fa92beb77a9bd5ad4aea41dc859d6555addcb176be76531fc8e5](https://sepolia.starkscan.co/tx/0x022f42eb66f4fa92beb77a9bd5ad4aea41dc859d6555addcb176be76531fc8e5)
+  * Contract: [https://sepolia.starkscan.co/contract/0x04b6a594dc9747caf1bd3d8933621366bbb7fbaefa1522174432611b577ae94d](https://sepolia.starkscan.co/contract/0x04b6a594dc9747caf1bd3d8933621366bbb7fbaefa1522174432611b577ae94d
+  )
+  * Transaction: [https://sepolia.starkscan.co/tx/0x04347f7cfe206498ee0b389415d1c4b36c2dd98be39a52c999318fed08472fb9](https://sepolia.starkscan.co/tx/0x04347f7cfe206498ee0b389415d1c4b36c2dd98be39a52c999318fed08472fb9)
 
 ### Constructor Configuration
 
