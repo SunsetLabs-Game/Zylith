@@ -11,7 +11,7 @@ export const CONFIG = {
   },
 
   // Services
-  ASP_SERVER_URL: process.env.NEXT_PUBLIC_ASP_URL || 'http://localhost:3001',
+  ASP_SERVER_URL: process.env.NEXT_PUBLIC_ASP_URL || 'http://localhost:3000',
   STARKNET_RPC: process.env.NEXT_PUBLIC_RPC_URL || 'https://starknet-sepolia.public.blastapi.io/rpc/v0_7',
   
   // Backend API
