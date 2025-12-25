@@ -18,16 +18,17 @@ export function usePoolState() {
 
     const fetchPoolState = async () => {
       try {
-        const contractClient = new ZylithContractClient(provider)
-        const state = await contractClient.getPoolState()
-        
-        if (state) {
-          updatePoolState({
-            sqrtPriceX128: state.sqrtPriceX128,
-            tick: state.tick,
-            liquidity: state.liquidity,
-          })
-        }
+        // TODO: Implement getPoolState in ZylithContractClient
+        // For now, skip pool state fetching
+        // const contractClient = new ZylithContractClient(provider as any)
+        // const state = await contractClient.getPoolState()
+        // if (state) {
+        //   updatePoolState({
+        //     sqrtPriceX128: state.sqrtPriceX128,
+        //     tick: state.tick,
+        //     liquidity: state.liquidity,
+        //   })
+        // }
       } catch (error) {
         console.warn("Failed to fetch pool state:", error)
       }

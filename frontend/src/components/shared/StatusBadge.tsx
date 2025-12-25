@@ -40,7 +40,7 @@ export function StatusBadge({ status, className, showLabel = true }: StatusBadge
     },
   }
 
-  const { icon: Icon, label, color, animate } = config[status]
+  const { icon: Icon, label, color, animate = false } = config[status] as { icon: any; label: string; color: string; animate?: boolean }
 
   return (
     <div className={cn(

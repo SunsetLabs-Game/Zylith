@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 
 export type ProofStep = 
+  | "idle"
   | "fetching_merkle" 
   | "generating_witness" 
   | "computing_proof" 
@@ -16,7 +17,7 @@ export type ProofStep =
 
 interface ProofProgressProps {
   currentStep: ProofStep
-  steps?: { id: ProofStep; label: string }[]
+  steps?: { id: ProofStep; label: string; estimatedTime?: number }[]
   error?: string
   onCancel?: () => void
 }
