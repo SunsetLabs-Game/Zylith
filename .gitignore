@@ -52,7 +52,6 @@ CLAUDE.md
 *.log
 
 dist/
-build/
 out/
 
 # Circuit files (generated artifacts)
