@@ -31,7 +31,7 @@ echo -e "${BLUE}=== Zylith ASP Server ===${NC}"
 
 # Configurar variables de entorno
 export RPC_URL="${RPC_URL:-https://api.cartridge.gg/x/starknet/sepolia}"
-export CONTRACT_ADDRESS="${CONTRACT_ADDRESS:-0x07fd7386f3b91ec5e130aafb85da7fe3cbfa069beb080789150c4b75efc5c9ef}"
+export CONTRACT_ADDRESS="${CONTRACT_ADDRESS:-0x00cf52fa0d4f080faac7e780ae5b7298047c1626db180ad7bd628fa87860dfba}"
 export PORT="${PORT:-3000}"
 
 echo -e "${YELLOW}Configuración:${NC}"

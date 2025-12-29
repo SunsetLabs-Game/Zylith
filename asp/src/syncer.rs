@@ -1,4 +1,4 @@
-use crate::merkle::MerkleTree;
+use crate::merkle::{MerkleTree, TREE_DEPTH};
 use num_bigint::BigUint;
 use starknet::{
     core::types::{BlockId, EventFilter, FieldElement},
@@ -95,10 +95,12 @@ impl Syncer {
             }
         }
         
-        // If state file doesn't exist or last_synced_block is 0, try to sync from contract deployment
+        // If state file doesn't exist or last_synced_block is 0, start from block 0 (genesis)
+        // This ensures we sync ALL events from the beginning
         if state.last_synced_block == 0 {
-            state.last_synced_block = 4438440;
+            state.last_synced_block = 0;
             Self::save_state(&state);
+            println!("[Syncer] 🚀 Starting fresh sync from block 0 (genesis)");
         }
         
         // Check if tree is empty but contract has deposits
@@ -111,8 +113,10 @@ impl Syncer {
             if let Some(ref blockchain) = self.blockchain_client {
                 match blockchain.get_merkle_root().await {
                     Ok(contract_root) if contract_root != "0x0" && contract_root != "0x0000000000000000000000000000000000000000000000000000000000000000" => {
-                        state.last_synced_block = 4438440;
+                        // If contract has deposits but tree is empty, start from block 0 to sync everything
+                        state.last_synced_block = 0;
                         Self::save_state(&state);
+                        println!("[Syncer] 🚀 Contract has deposits but tree is empty - starting sync from block 0");
                     }
                     _ => {}
                 }
@@ -120,9 +124,28 @@ impl Syncer {
         }
 
         loop {
+            // Reload state from file in each iteration to pick up resync requests
+            // This allows the /deposit/resync endpoint to trigger immediate resync
+            let current_state = Self::load_state();
+            if current_state.last_synced_block < state.last_synced_block {
+                // State file was reset to an earlier block - force resync
+                println!("[Syncer] 🔄 Detected resync request - resetting to block {}", current_state.last_synced_block);
+                state.last_synced_block = current_state.last_synced_block;
+                
+                // Clear the tree to force full resync
+                {
+                    let mut tree = self.tree.lock().unwrap();
+                    *tree = MerkleTree::new(TREE_DEPTH); // Reset tree - use TREE_DEPTH constant
+                }
+            } else if current_state.last_synced_block != state.last_synced_block {
+                // State was updated but not reset - just update our state
+                state.last_synced_block = current_state.last_synced_block;
+            }
+            
+            // TEMPORARILY DISABLED FOR DEBUGGING - Root check causes infinite loop
             // First, verify our tree root matches the contract
             // Do this check separately to avoid Send issues - must drop lock before await
-            let should_resync = if let Some(ref blockchain) = self.blockchain_client {
+            let _should_resync = if let Some(ref blockchain) = self.blockchain_client {
                 // Get local root first (drop lock before await)
                 let local_root = {
                     let tree = self.tree.lock().unwrap();
@@ -133,13 +156,25 @@ impl Syncer {
                 let contract_root_result = blockchain.get_merkle_root().await;
                 
                 match contract_root_result {
-                    Ok(contract_root) if contract_root != local_root => {
-                        // Silently resync - don't spam logs
-                        true
+                    Ok(contract_root) => {
+                        // Log comparison but don't resync for debugging
+                        if contract_root != local_root {
+                            println!("[Syncer] 🛑 Root mismatch detected (DEBUG MODE - resync disabled):");
+                            println!("[Syncer]    Local root:     {}", local_root);
+                            println!("[Syncer]    On-chain root: {}", contract_root);
+                            
+                            // Show tree status for debugging
+                            let tree = self.tree.lock().unwrap();
+                            let leaf_count = tree.get_leaf_count();
+                            println!("[Syncer]    Tree has {} leaves", leaf_count);
+                            drop(tree);
+                        } else {
+                            println!("[Syncer] ✅ Roots match: {}", local_root);
+                        }
+                        false // Don't resync in debug mode
                     }
-                    Ok(_) => false,
                     Err(e) => {
-                        eprintln!("Failed to get contract root: {:?}", e);
+                        eprintln!("[Syncer] ❌ Failed to get contract root: {:?}", e);
                         false
                     }
                 }
@@ -147,30 +182,49 @@ impl Syncer {
                 false
             };
 
-            // If root mismatch, do a full resync from contract deployment
-            // This ensures we can recover all deposits even if syncer was restarted or had gaps
+            // DISABLED FOR DEBUGGING - Uncomment to re-enable auto-resync
+            /*
+            // If root mismatch, do a full resync from block 0
+            // This ensures we sync ALL deposits from the beginning
             if should_resync {
                 let tree = self.tree.lock().unwrap();
                 let leaf_count = tree.get_leaf_count();
                 drop(tree);
                 
-                if leaf_count == 0 {
-                    state.last_synced_block = 4438440;
-                } else {
-                    state.last_synced_block = 4438440;
-                }
+                println!("[Syncer] 🔄 Root mismatch detected - starting full resync from block 0");
+                println!("[Syncer]    Current tree has {} leaves", leaf_count);
+                state.last_synced_block = 0; // Start from genesis to sync everything
                 Self::save_state(&state);
+                
+                // Clear the tree to force full resync
+                {
+                    let mut tree = self.tree.lock().unwrap();
+                    *tree = MerkleTree::new(TREE_DEPTH); // Reset tree - use TREE_DEPTH constant
+                }
+                println!("[Syncer] ✅ Tree cleared, will sync all events from block 0");
             }
+            */
 
             match self.sync_events(state.last_synced_block).await {
                 Ok(new_last_block) => {
                     if new_last_block > state.last_synced_block {
+                        let old_block = state.last_synced_block;
                         state.last_synced_block = new_last_block;
                         Self::save_state(&state);
+                        
+                        // Log progress if we synced a significant number of blocks
+                        if new_last_block - old_block > 100 {
+                            let tree = self.tree.lock().unwrap();
+                            let leaf_count = tree.get_leaf_count();
+                            drop(tree);
+                            println!("[Syncer] ✅ Synced from block {} to {} ({} leaves in tree)", 
+                                old_block, new_last_block, leaf_count);
+                        }
                     }
                 }
-                Err(_e) => {
-                    // Silently handle sync errors
+                Err(e) => {
+                    eprintln!("[Syncer] ❌ Sync error: {:?}", e);
+                    // Continue trying - don't exit on error
                 }
             }
             sleep(Duration::from_secs(5)).await;

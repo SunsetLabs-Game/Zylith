@@ -311,6 +311,16 @@ pub async fn generate_swap_proof(
             .map_err(|e| format!("Failed to read public signals: {}", e))?
     ).map_err(|e| format!("Failed to parse public signals: {}", e))?;
     
+    // CRITICAL: Validate public_signals length BEFORE processing
+    if public_signals.len() != 9 {
+        return Err(format!(
+            "Invalid public signals length: expected 9 elements (swap circuit), got {}. \
+            This indicates the circuit did not generate the expected number of public inputs. \
+            Check the circuit output and ensure all 9 public inputs are being generated.",
+            public_signals.len()
+        ));
+    }
+    
     // Apply felt252 modulo to public inputs to prevent overflow
     // STARKNET_FELT_MAX = 2^251 + 17 * 2^192 + 1
     use num_bigint::BigUint;
@@ -320,18 +330,39 @@ pub async fn generate_swap_proof(
     let felt_max_big = BigUint::from_str(felt_max_str)
         .map_err(|_| "Failed to parse FELT_MAX constant".to_string())?;
     
+    // Public inputs order (swap circuit):
+    // 0: nullifier (felt252)
+    // 1: root (felt252)
+    // 2: new_commitment (felt252)
+    // 3: amount_specified (u128)
+    // 4: zero_for_one (bool, 0 or 1)
+    // 5: expected_amount0_delta (i128 as u256)
+    // 6: expected_amount1_delta (i128 as u256)
+    // 7: expected_new_sqrt_price_x128 (u256)
+    // 8: expected_new_tick (i32 as u256)
+    //
+    // NOTE: The verifier returns values as u256, and the contract converts felt252 values
+    // (indices 0, 1, 2) from u256 to felt252 using try_into().unwrap().
+    // This requires that the u256.high = 0, which is guaranteed if the value < 2^128.
+    // However, felt252 values can be up to 2^250, so values >= 2^128 will have high != 0.
+    // The contract should use .low instead of try_into(), but since we can't modify the contract,
+    // we ensure the values are properly formatted as felt252 (within felt252 range).
+    // The actual conversion issue must be handled by the contract using .low for felt252 values.
+    
     // Read public signals and apply felt252 modulo
     let public_inputs: Vec<String> = public_signals
         .iter()
-        .map(|s| {
-            let value_str = s.as_str().unwrap();
+        .enumerate()
+        .map(|(idx, s)| {
+            let value_str = s.as_str()
+                .ok_or_else(|| format!("Public signal at index {} is not a string: {:?}", idx, s))?;
             // Parse as BigUint (handles both hex and decimal)
             let value_big = if value_str.starts_with("0x") {
                 BigUint::from_str_radix(&value_str[2..], 16)
-                    .unwrap_or_else(|_| BigUint::from(0u8))
+                    .map_err(|e| format!("Failed to parse hex value at index {}: {}", idx, e))?
             } else {
                 BigUint::from_str(value_str)
-                    .unwrap_or_else(|_| BigUint::from(0u8))
+                    .map_err(|e| format!("Failed to parse decimal value at index {}: {}", idx, e))?
             };
             
             // Apply felt252 modulo if value exceeds limit
@@ -342,9 +373,9 @@ pub async fn generate_swap_proof(
             };
             
             // Convert to string (decimal format for felt252)
-            modulo_big.to_string()
+            Ok(modulo_big.to_string())
         })
-        .collect();
+        .collect::<Result<Vec<String>, String>>()?;
     
     // Proof calldata should only contain the 8 proof elements (A.x, A.y, B.x0, B.x1, B.y0, B.y1, C.x, C.y)
     // Public inputs are returned separately
@@ -357,6 +388,33 @@ pub async fn generate_swap_proof(
     // Verify proof has exactly 8 elements
     if proof_len != 8 {
         return Err(format!("Invalid proof length: expected 8 elements, got {}", proof_len));
+    }
+    
+    // Verify public inputs have exactly 9 elements
+    if public_inputs.len() != 9 {
+        return Err(format!("Invalid public inputs length: expected 9 elements, got {}", public_inputs.len()));
+    }
+    
+    // Log and validate felt252 values (indices 0, 1, 2) to help diagnose conversion issues
+    // The contract converts these from u256 to felt252 using try_into(), which requires high = 0
+    let u128_max_big = BigUint::from_str("340282366920938463463374607431768211455") // 2^128 - 1
+        .map_err(|_| "Failed to parse U128_MAX".to_string())?;
+    
+    for (idx, val_str) in public_inputs.iter().take(3).enumerate() {
+        let val_big = BigUint::from_str(val_str)
+            .unwrap_or_else(|_| BigUint::from(0u8));
+        let fits_in_u128 = val_big < u128_max_big;
+        let field_name = match idx {
+            0 => "nullifier",
+            1 => "root",
+            2 => "new_commitment",
+            _ => unreachable!(),
+        };
+        println!("[Proof]    {}[{}]: {} (fits in u128: {})", field_name, idx, val_str, fits_in_u128);
+        if !fits_in_u128 {
+            println!("[Proof]    ⚠️  WARNING: {} value >= 2^128, verifier will return u256 with high != 0", field_name);
+            println!("[Proof]    ⚠️  Contract's try_into() will fail. Contract should use .low instead.");
+        }
     }
     
     // Clean up temp files
@@ -539,13 +597,485 @@ pub async fn generate_withdraw_proof(
     Err("Withdraw proof generation not yet implemented".to_string())
 }
 
+/// Generate LP proof (mint/burn) using rapidsnark (fast) with correct format conversion
+/// This function works for both mint and burn operations (same circuit)
+pub async fn generate_lp_proof(
+    circuits_path: &str,
+    input_json: serde_json::Value,
+) -> Result<LiquidityProof, String> {
+    println!("[Proof] 🔄 Starting LP proof generation with rapidsnark...");
+    let start_time = std::time::Instant::now();
+    
+    // Create temporary files
+    let temp_dir = std::env::temp_dir();
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap().as_nanos();
+    let input_file = temp_dir.join(format!("lp_input_{}.json", timestamp));
+    let witness_file = temp_dir.join(format!("lp_witness_{}.wtns", timestamp));
+    let proof_file = temp_dir.join(format!("lp_proof_{}.json", timestamp));
+    let public_file = temp_dir.join(format!("lp_public_{}.json", timestamp));
+    
+    fs::write(&input_file, serde_json::to_string_pretty(&input_json).unwrap())
+        .map_err(|e| format!("Failed to write input file: {}", e))?;
+    
+    println!("[Proof] 📝 Input file created: {:?}", input_file);
+    
+    // Paths to circuit files
+    let circuits_dir = Path::new(circuits_path).canonicalize()
+        .map_err(|e| format!("Failed to canonicalize circuits path: {}", e))?;
+    let wasm_path = circuits_dir.join("build").join("lp").join("lp_js").join("lp.wasm");
+    let zkey_path = circuits_dir.join("build").join("zkeys").join("lp.zkey");
+    
+    // Check for rapidsnark binary
+    let asp_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rapidsnark_path = asp_dir.join("bin").join("rapidsnark");
+    let use_rapidsnark = rapidsnark_path.exists();
+    
+    if !wasm_path.exists() {
+        return Err(format!("WASM file not found: {:?}", wasm_path));
+    }
+    if !zkey_path.exists() {
+        return Err(format!("ZKey file not found: {:?}", zkey_path));
+    }
+    
+    // Step 1: Calculate witness using snarkjs (this is fast)
+    println!("[Proof] 🔧 Step 1: Calculating witness with snarkjs...");
+    let witness_script = format!(
+        r#"
+        const snarkjs = require('snarkjs');
+        const fs = require('fs');
+        const path = require('path');
+        
+        (async () => {{
+            try {{
+                const input = JSON.parse(fs.readFileSync('{}', 'utf8'));
+                const wasmPath = path.resolve('{}');
+                
+                console.log('Calculating witness...');
+                const startTime = Date.now();
+                
+                const {{ wtns }} = await snarkjs;
+                await wtns.calculate(input, wasmPath, '{}');
+                
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+                console.log('Witness calculated in', elapsed, 'seconds');
+            }} catch (error) {{
+                console.error('Error:', error.message);
+                console.error('Stack:', error.stack);
+                process.exit(1);
+            }}
+        }})();
+        "#,
+        input_file.to_str().unwrap().replace('\\', "/"),
+        wasm_path.to_str().unwrap().replace('\\', "/"),
+        witness_file.to_str().unwrap().replace('\\', "/")
+    );
+    
+    let script_file = circuits_dir.join(format!("witness_script_{}.js", timestamp));
+    fs::write(&script_file, witness_script)
+        .map_err(|e| format!("Failed to write witness script: {}", e))?;
+    
+    let witness_start = std::time::Instant::now();
+    let witness_output = Command::new("node")
+        .env("NODE_OPTIONS", "--max-old-space-size=4096")
+        .arg(script_file.file_name().unwrap())
+        .current_dir(&circuits_dir)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run witness calculation: {}", e))?;
+    
+    let _ = fs::remove_file(&script_file);
+    
+    if !witness_output.status.success() {
+        let stderr = String::from_utf8_lossy(&witness_output.stderr);
+        let stdout = String::from_utf8_lossy(&witness_output.stdout);
+        let _ = fs::remove_file(&input_file);
+        return Err(format!("Witness calculation failed:\nSTDOUT: {}\nSTDERR: {}", stdout, stderr));
+    }
+    
+    println!("[Proof] ✅ Witness calculated in {:.2}s", witness_start.elapsed().as_secs_f64());
+    
+    // Step 2: Generate proof (use rapidsnark if available, otherwise snarkjs)
+    if use_rapidsnark {
+        println!("[Proof] 🔧 Step 2: Generating proof with rapidsnark (fast C++ prover)...");
+        let proof_start = std::time::Instant::now();
+        
+        let rapidsnark_output = Command::new(&rapidsnark_path)
+            .arg(&zkey_path)
+            .arg(&witness_file)
+            .arg(&proof_file)
+            .arg(&public_file)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run rapidsnark: {}", e))?;
+        
+        if !rapidsnark_output.status.success() {
+            let stderr = String::from_utf8_lossy(&rapidsnark_output.stderr);
+            let stdout = String::from_utf8_lossy(&rapidsnark_output.stdout);
+            let _ = fs::remove_file(&input_file);
+            let _ = fs::remove_file(&witness_file);
+            return Err(format!("rapidsnark failed:\nSTDOUT: {}\nSTDERR: {}", stdout, stderr));
+        }
+        
+        println!("[Proof] ✅ Proof generated with rapidsnark in {:.2}s", proof_start.elapsed().as_secs_f64());
+    } else {
+        println!("[Proof] 🔧 Step 2: Generating proof with snarkjs (fallback)...");
+        let proof_script = format!(
+            r#"
+            const snarkjs = require('snarkjs');
+            const fs = require('fs');
+            
+            (async () => {{
+                try {{
+                    console.log('Generating proof...');
+                    const startTime = Date.now();
+                    
+                    const {{ proof, publicSignals }} = await snarkjs.groth16.prove(
+                        '{}',
+                        '{}'
+                    );
+                    
+                    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+                    console.log('Proof generated in', elapsed, 'seconds');
+                    
+                    fs.writeFileSync('{}', JSON.stringify(proof, null, 2));
+                    fs.writeFileSync('{}', JSON.stringify(publicSignals, null, 2));
+                }} catch (error) {{
+                    console.error('Error:', error.message);
+                    process.exit(1);
+                }}
+            }})();
+            "#,
+            zkey_path.to_str().unwrap().replace('\\', "/"),
+            witness_file.to_str().unwrap().replace('\\', "/"),
+            proof_file.to_str().unwrap().replace('\\', "/"),
+            public_file.to_str().unwrap().replace('\\', "/")
+        );
+        
+        let script_file2 = circuits_dir.join(format!("proof_script_{}.js", timestamp));
+        fs::write(&script_file2, proof_script)
+            .map_err(|e| format!("Failed to write proof script: {}", e))?;
+        
+        let proof_start = std::time::Instant::now();
+        let mut child = Command::new("node")
+            .env("NODE_OPTIONS", "--max-old-space-size=4096")
+            .arg(script_file2.file_name().unwrap())
+            .current_dir(&circuits_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn node: {}", e))?;
+        
+        // Wait with progress updates
+        let mut last_log = std::time::Instant::now();
+        let output = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let output = child.wait_with_output().await
+                        .map_err(|e| format!("Failed to get output: {}", e))?;
+                    break output;
+                }
+                Ok(None) => {
+                    if last_log.elapsed().as_secs() >= 30 {
+                        println!("[Proof] ⏳ Still processing... ({}s elapsed)", proof_start.elapsed().as_secs());
+                        last_log = std::time::Instant::now();
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                }
+                Err(e) => return Err(format!("Error waiting: {}", e)),
+            }
+        };
+        
+        let _ = fs::remove_file(&script_file2);
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let _ = fs::remove_file(&input_file);
+            let _ = fs::remove_file(&witness_file);
+            return Err(format!("snarkjs proof failed:\nSTDOUT: {}\nSTDERR: {}", stdout, stderr));
+        }
+        
+        println!("[Proof] ✅ Proof generated with snarkjs in {:.2}s", proof_start.elapsed().as_secs_f64());
+    }
+    
+    // Step 3: Add protocol field to proof (required by convert_garaga.py script)
+    println!("[Proof] 🔧 Step 3: Adding protocol field to proof...");
+    let add_protocol_script = format!(
+        r#"
+        const fs = require('fs');
+        const proof = JSON.parse(fs.readFileSync('{}', 'utf8'));
+        
+        // Add protocol field if not present (required by convert_garaga.py)
+        if (!proof.protocol) {{
+            proof.protocol = "groth16";
+        }}
+        
+        // Ensure pi_a, pi_b, pi_c are in correct format (remove extra elements)
+        if (proof.pi_a && proof.pi_a.length > 2) {{
+            proof.pi_a = [proof.pi_a[0], proof.pi_a[1]];
+        }}
+        if (proof.pi_b && proof.pi_b.length > 2) {{
+            proof.pi_b = [proof.pi_b[0], proof.pi_b[1]];
+        }}
+        if (proof.pi_c && proof.pi_c.length > 2) {{
+            proof.pi_c = [proof.pi_c[0], proof.pi_c[1]];
+        }}
+        
+        fs.writeFileSync('{}', JSON.stringify(proof, null, 2));
+        "#,
+        proof_file.to_str().unwrap().replace('\\', "/"),
+        proof_file.to_str().unwrap().replace('\\', "/")
+    );
+    
+    let protocol_file = circuits_dir.join(format!("add_protocol_{}.js", timestamp));
+    fs::write(&protocol_file, add_protocol_script)
+        .map_err(|e| format!("Failed to write protocol script: {}", e))?;
+    
+    let protocol_output = Command::new("node")
+        .arg(protocol_file.file_name().unwrap())
+        .current_dir(&circuits_dir)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run protocol script: {}", e))?;
+    
+    let _ = fs::remove_file(&protocol_file);
+    
+    if !protocol_output.status.success() {
+        let stderr = String::from_utf8_lossy(&protocol_output.stderr);
+        return Err(format!("Failed to add protocol field: {}", stderr));
+    }
+    
+    println!("[Proof] ✅ Protocol field added to proof");
+    
+    // Step 4: Convert proof to Garaga format and generate calldata using Python script
+    println!("[Proof] 🔧 Step 4: Converting proof to Garaga format and generating calldata...");
+    let garaga_start = std::time::Instant::now();
+    
+    // Get script path (relative to project root)
+    let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()
+        .ok_or("Failed to get project root")?;
+    let script_path = project_root.join("scripts").join("convert_garaga.py");
+    
+    if !script_path.exists() {
+        return Err(format!("Garaga conversion script not found: {:?}", script_path));
+    }
+    
+    // Call Python script to convert proof and generate calldata directly
+    let script_output = Command::new("python3")
+        .arg(&script_path)
+        .arg(&proof_file)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run convert_garaga.py script: {}", e))?;
+    
+    if !script_output.status.success() {
+        let stderr = String::from_utf8_lossy(&script_output.stderr);
+        let stdout = String::from_utf8_lossy(&script_output.stdout);
+        println!("[Proof] ❌ Python script failed.");
+        println!("[Proof] 📋 STDERR:\n{}", stderr);
+        println!("[Proof] 📋 STDOUT:\n{}", stdout);
+        println!("[Proof] 💾 Proof saved at: {:?}", proof_file);
+        
+        let _ = fs::remove_file(&input_file);
+        let _ = fs::remove_file(&witness_file);
+        let _ = fs::remove_file(&public_file);
+        
+        return Err(format!(
+            "Garaga conversion script failed.\n\
+             STDERR: {}\n\
+             STDOUT: {}\n\
+             \n\
+             Proof file at: {:?}",
+            stderr, stdout, proof_file
+        ));
+    }
+    
+    // Parse calldata from script output (JSON array)
+    let script_stdout = String::from_utf8_lossy(&script_output.stdout);
+    let proof_calldata_raw: Vec<String> = serde_json::from_str(script_stdout.trim())
+        .map_err(|e| format!("Failed to parse calldata from script: {}. Output: {}", e, script_stdout))?;
+    
+    // Apply felt252 modulo to all proof values (BN254 field values can exceed felt252 max)
+    // STARKNET_FELT_MAX = 2^251 + 17 * 2^192 + 1
+    use num_bigint::BigUint;
+    use num_traits::Num;
+    use std::str::FromStr;
+    let felt_max_str = "3618502788666131106986593281521497120414687020801267626233049500247285301248";
+    let felt_max_big = BigUint::from_str(felt_max_str)
+        .map_err(|_| "Failed to parse FELT_MAX constant".to_string())?;
+    
+    let proof_calldata: Vec<String> = proof_calldata_raw
+        .iter()
+        .map(|val_str| {
+            // Parse as BigUint (handles both hex and decimal)
+            let value_big = if val_str.starts_with("0x") {
+                BigUint::from_str_radix(&val_str[2..], 16)
+                    .unwrap_or_else(|_| BigUint::from(0u8))
+            } else {
+                BigUint::from_str(val_str)
+                    .unwrap_or_else(|_| BigUint::from(0u8))
+            };
+            
+            // Apply felt252 modulo if value exceeds limit
+            let modulo_big = if value_big >= felt_max_big {
+                &value_big % &felt_max_big
+            } else {
+                value_big.clone()
+            };
+            
+            // Convert to string (decimal format for felt252)
+            modulo_big.to_string()
+        })
+        .collect();
+    
+    println!("[Proof] ✅ Garaga calldata generated in {:.2}s", garaga_start.elapsed().as_secs_f64());
+    println!("[Proof]    Proof calldata length: {} elements", proof_calldata.len());
+    
+    // Read public signals for the response
+    let public_signals: Vec<serde_json::Value> = serde_json::from_str(
+        &fs::read_to_string(&public_file)
+            .map_err(|e| format!("Failed to read public signals: {}", e))?
+    ).map_err(|e| format!("Failed to parse public signals: {}", e))?;
+    
+    // CRITICAL: Validate public_signals length BEFORE processing
+    // LP circuit has 7 public inputs: nullifier, root, tick_lower, tick_upper, liquidity, new_commitment, position_commitment
+    if public_signals.len() != 7 {
+        return Err(format!(
+            "Invalid public signals length: expected 7 elements (LP circuit), got {}. \
+            This indicates the circuit did not generate the expected number of public inputs. \
+            Check the circuit output and ensure all 7 public inputs are being generated.",
+            public_signals.len()
+        ));
+    }
+    
+    // Public inputs order (LP circuit):
+    // 0: nullifier (felt252)
+    // 1: root (felt252)
+    // 2: tick_lower (i32)
+    // 3: tick_upper (i32)
+    // 4: liquidity (u128)
+    // 5: new_commitment (felt252)
+    // 6: position_commitment (felt252)
+    //
+    // NOTE: The verifier returns values as u256, and the contract converts felt252 values
+    // (indices 0, 1, 5, 6) from u256 to felt252 using reconstruction when high != 0.
+    
+    // Read public signals and apply felt252 modulo for felt252 values
+    let public_inputs: Vec<String> = public_signals
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            let value_str = s.as_str()
+                .ok_or_else(|| format!("Public signal at index {} is not a string: {:?}", idx, s))?;
+            // Parse as BigUint (handles both hex and decimal)
+            let value_big = if value_str.starts_with("0x") {
+                BigUint::from_str_radix(&value_str[2..], 16)
+                    .map_err(|e| format!("Failed to parse hex value at index {}: {}", idx, e))?
+            } else {
+                BigUint::from_str(value_str)
+                    .map_err(|e| format!("Failed to parse decimal value at index {}: {}", idx, e))?
+            };
+            
+            // Apply felt252 modulo only for felt252 values (indices 0, 1, 5, 6)
+            // tick_lower, tick_upper, liquidity are not felt252, so don't apply modulo
+            let modulo_big = if idx == 0 || idx == 1 || idx == 5 || idx == 6 {
+                if value_big >= felt_max_big {
+                    &value_big % &felt_max_big
+                } else {
+                    value_big.clone()
+                }
+            } else {
+                value_big.clone()
+            };
+            
+            // Convert to string (decimal format for felt252)
+            Ok(modulo_big.to_string())
+        })
+        .collect::<Result<Vec<String>, String>>()?;
+    
+    // Proof calldata should only contain the 8 proof elements (A.x, A.y, B.x0, B.x1, B.y0, B.y1, C.x, C.y)
+    // Public inputs are returned separately
+    // The contract expects: proof (8 elements) and public_inputs (7 elements) as separate arrays
+    let proof_len = proof_calldata.len();
+    
+    println!("[Proof]    Proof calldata length: {} elements (should be 8)", proof_len);
+    println!("[Proof]    Public inputs length: {} elements (should be 7)", public_inputs.len());
+    
+    // Verify proof has exactly 8 elements
+    if proof_len != 8 {
+        return Err(format!("Invalid proof length: expected 8 elements, got {}", proof_len));
+    }
+    
+    // Verify public inputs have exactly 7 elements
+    if public_inputs.len() != 7 {
+        return Err(format!("Invalid public inputs length: expected 7 elements, got {}", public_inputs.len()));
+    }
+    
+    // Log and validate felt252 values (indices 0, 1, 5, 6) to help diagnose conversion issues
+    let u128_max_big = BigUint::from_str("340282366920938463463374607431768211455") // 2^128 - 1
+        .map_err(|_| "Failed to parse U128_MAX".to_string())?;
+    
+    for idx in [0, 1, 5, 6] {
+        if let Some(val_str) = public_inputs.get(idx) {
+            let val_big = BigUint::from_str(val_str)
+                .unwrap_or_else(|_| BigUint::from(0u8));
+            let fits_in_u128 = val_big < u128_max_big;
+            let field_name = match idx {
+                0 => "nullifier",
+                1 => "root",
+                5 => "new_commitment",
+                6 => "position_commitment",
+                _ => unreachable!(),
+            };
+            println!("[Proof]    {}[{}]: {} (fits in u128: {})", field_name, idx, val_str, fits_in_u128);
+            if !fits_in_u128 {
+                println!("[Proof]    ⚠️  WARNING: {} value >= 2^128, verifier will return u256 with high != 0", field_name);
+                println!("[Proof]    ⚠️  Contract should use reconstruction (high * q128 + low) instead of .low");
+            }
+        }
+    }
+    
+    // Clean up temp files
+    let _ = fs::remove_file(&input_file);
+    let _ = fs::remove_file(&witness_file);
+    let _ = fs::remove_file(&proof_file);
+    let _ = fs::remove_file(&public_file);
+    
+    let elapsed = start_time.elapsed().as_secs_f64();
+    println!("[Proof] ✅ Total proof time: {:.2}s ({})", elapsed, 
+        if use_rapidsnark { "with rapidsnark" } else { "with snarkjs" });
+    
+    Ok(LiquidityProof {
+        proof: proof_calldata, // Only the 8 proof elements, not combined with public inputs
+        public_inputs,
+    })
+}
+
 /// Generate mint liquidity proof using Circom circuit
 pub async fn generate_mint_liquidity_proof(
-    _circuits_path: &str,
-    _inputs: MintProofInputs,
+    circuits_path: &str,
+    inputs: MintProofInputs,
 ) -> Result<LiquidityProof, String> {
-    // TODO: Implement Circom proof generation
-    Err("Mint liquidity proof generation not yet implemented".to_string())
+    // Convert MintProofInputs to JSON for generate_lp_proof
+    let input_json = serde_json::json!({
+        "nullifier": inputs.nullifier,
+        "root": inputs.root,
+        "tick_lower": inputs.tick_lower,
+        "tick_upper": inputs.tick_upper,
+        "liquidity": inputs.liquidity,
+        "new_commitment": "", // Will be calculated from secret_out, nullifier_out, amount_out
+        "position_commitment": "", // Will be calculated from secret_in, tick_lower, tick_upper
+        "secret_in": inputs.secret,
+        "amount_in": inputs.amount,
+        "secret_out": inputs.new_secret,
+        "nullifier_out": inputs.new_nullifier,
+        "amount_out": inputs.new_amount,
+        "pathElements": inputs.merkle_path,
+        "pathIndices": inputs.merkle_path_indices.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+    });
+    
+    generate_lp_proof(circuits_path, input_json).await
 }
 
 /// Generate burn liquidity proof using Circom circuit

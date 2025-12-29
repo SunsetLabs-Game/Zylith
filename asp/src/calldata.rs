@@ -134,6 +134,7 @@ pub fn build_withdraw_calldata(
 }
 
 /// Build calldata for private_mint_liquidity
+/// Returns Vec<String> with decimal strings (not hex) to avoid JSON serialization issues
 pub fn build_mint_liquidity_calldata(
     proof: &[String],
     public_inputs: &[String],
@@ -141,7 +142,7 @@ pub fn build_mint_liquidity_calldata(
     tick_upper: i32,
     liquidity: u128,
     new_commitment: &str,
-) -> Result<Vec<FieldElement>, String> {
+) -> Result<Vec<String>, String> {
     // private_mint_liquidity(
     //   proof: Array<felt252>,
     //   public_inputs: Array<felt252>,
@@ -151,31 +152,64 @@ pub fn build_mint_liquidity_calldata(
     //   new_commitment: felt252
     // )
     
+    println!("[Calldata] Building mint_liquidity calldata:");
+    println!("[Calldata]   proof length: {}", proof.len());
+    println!("[Calldata]   public_inputs length: {}", public_inputs.len());
+    println!("[Calldata]   tick_lower: {} (i32)", tick_lower);
+    println!("[Calldata]   tick_upper: {} (i32)", tick_upper);
+    println!("[Calldata]   liquidity: {}", liquidity);
+    println!("[Calldata]   new_commitment: {}", new_commitment);
+    
     let mut calldata = Vec::new();
     
-    // Format proof array
-    calldata.push(FieldElement::from(proof.len() as u64));
+    // Format proof array - convert to decimal strings
+    calldata.push(proof.len().to_string());
     for p in proof {
-        calldata.push(parse_felt(p)?);
+        // Parse and convert to decimal string
+        let felt = parse_felt(p)?;
+        let fe_str = format!("{:x}", felt); // Get hex without 0x prefix
+        let big_uint = BigUint::from_str_radix(&fe_str, 16)
+            .map_err(|e| format!("Failed to parse proof element '{}': {}", p, e))?;
+        calldata.push(big_uint.to_str_radix(10)); // Convert to decimal string
     }
     
-    // Format public_inputs array
-    calldata.push(FieldElement::from(public_inputs.len() as u64));
+    // Format public_inputs array - convert to decimal strings
+    calldata.push(public_inputs.len().to_string());
     for pi in public_inputs {
-        calldata.push(parse_felt(pi)?);
+        // Parse and convert to decimal string
+        let felt = parse_felt(pi)?;
+        let fe_str = format!("{:x}", felt); // Get hex without 0x prefix
+        let big_uint = BigUint::from_str_radix(&fe_str, 16)
+            .map_err(|e| format!("Failed to parse public input '{}': {}", pi, e))?;
+        calldata.push(big_uint.to_str_radix(10)); // Convert to decimal string
     }
     
-    // tick_lower: i32 -> felt252 (handle negative)
-    calldata.push(i32_to_felt(tick_lower));
+    println!("[Calldata] After arrays: calldata length = {}", calldata.len());
     
-    // tick_upper: i32 -> felt252
-    calldata.push(i32_to_felt(tick_upper));
+    // tick_lower: i32 -> send as signed integer string
+    // StarkNet.js will handle the conversion to felt252 internally
+    // Don't pre-convert to felt252 - let the SDK do it
+    let tick_lower_str = tick_lower.to_string(); // e.g., "-1000" or "1000"
+    println!("[Calldata] tick_lower: {} (i32) -> {} (string) - StarkNet.js will convert to felt252", 
+        tick_lower, tick_lower_str);
+    calldata.push(tick_lower_str);
     
-    // liquidity: u128
-    calldata.push(FieldElement::from(liquidity));
+    // tick_upper: i32 -> send as signed integer string
+    // StarkNet.js will handle the conversion to felt252 internally
+    let tick_upper_str = tick_upper.to_string(); // e.g., "-1000" or "1000"
+    println!("[Calldata] tick_upper: {} (i32) -> {} (string) - StarkNet.js will convert to felt252", 
+        tick_upper, tick_upper_str);
+    calldata.push(tick_upper_str);
     
-    // new_commitment: felt252
-    calldata.push(parse_felt(new_commitment)?);
+    // liquidity: u128 -> decimal string
+    calldata.push(liquidity.to_string());
+    
+    // new_commitment: felt252 -> decimal string
+    let commitment_felt = parse_felt(new_commitment)?;
+    let commitment_str = format!("{:x}", commitment_felt); // Get hex without 0x prefix
+    let commitment_big = BigUint::from_str_radix(&commitment_str, 16)
+        .map_err(|e| format!("Failed to parse commitment '{}': {}", new_commitment, e))?;
+    calldata.push(commitment_big.to_str_radix(10)); // Convert to decimal string
     
     Ok(calldata)
 }
@@ -188,7 +222,7 @@ pub fn build_burn_liquidity_calldata(
     tick_upper: i32,
     liquidity: u128,
     new_commitment: &str,
-) -> Result<Vec<FieldElement>, String> {
+) -> Result<Vec<String>, String> {
     // Same signature as mint
     build_mint_liquidity_calldata(proof, public_inputs, tick_lower, tick_upper, liquidity, new_commitment)
 }
@@ -203,24 +237,25 @@ pub fn u256_to_low_high(amount: u128) -> (u128, u128) {
 // It should be passed directly as a FieldElement, not split into low/high
 
 /// Convert i32 to felt252 (handles negative values)
+/// In Cairo, i32 negative values use Cairo prime field arithmetic
+/// Negative value -n is represented as: CAIRO_PRIME - n
+/// CAIRO_PRIME = 2^251 + 17 * 2^192 + 1 = 0x800000000000011000000000000000000000000000000000000000000000001
 fn i32_to_felt(value: i32) -> FieldElement {
-    // For negative values, we need to use two's complement representation
-    // In Cairo, i32 is represented as felt252 using two's complement
     if value >= 0 {
         FieldElement::from(value as u64)
     } else {
-        // For negative: convert using two's complement
-        // In Starknet, negative i32 is represented as: PRIME - |value|
-        // PRIME = 2^251 + 17 * 2^192 + 1
-        // For simplicity, we'll use FieldElement's native handling
-        // Convert to u32 first, then handle as felt252
+        // For negative: use Cairo prime field arithmetic
+        // Formula: CAIRO_PRIME - |value|
+        // CAIRO_PRIME = 3618502788666131106986593281521497120414687020801267626233049500247285301248
+        let cairo_prime_str = "3618502788666131106986593281521497120414687020801267626233049500247285301248";
+        let cairo_prime = FieldElement::from_str(cairo_prime_str)
+            .expect("Failed to parse CAIRO_PRIME constant");
+        
         let abs_value = (-value) as u64;
-        // Use a large constant that represents the field prime
-        // FieldElement::MAX - abs_value + 1 (two's complement)
-        // Actually, FieldElement handles this automatically when we convert
-        // For now, use a simpler approach: just convert the absolute value
-        // and let Cairo handle the sign interpretation
-        FieldElement::from(abs_value)
+        let abs_felt = FieldElement::from(abs_value);
+        
+        // CAIRO_PRIME - abs_value (field arithmetic)
+        cairo_prime - abs_felt
     }
 }
 

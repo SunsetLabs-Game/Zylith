@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Merkle Tree Depth (matches Cairo contract)
+/// Contract uses depth 25
 pub const TREE_DEPTH: usize = 25;
 
 /// Mask used in Cairo contract to ensure BN254 hash fits in felt252
@@ -39,18 +40,13 @@ pub struct MerkleTree {
 impl MerkleTree {
     pub fn new(depth: usize) -> Self {
         let mask = BigUint::from_str_radix(MASK, 16).unwrap();
-        let mut zeros = Vec::with_capacity(depth + 1);
-        let mut current_zero = BigUint::from(0u8);
-        zeros.push(current_zero.clone());
+        
+        // CRITICAL: Cairo contract uses 0 for empty nodes, not recursive hash
+        // Initialize zeros as all 0s (matching Cairo contract behavior)
+        let zeros = vec![BigUint::from(0u8); depth + 1];
 
-        // Pre-compute zeros for each level: zero[i] = hash(zero[i-1], zero[i-1])
-        for _ in 0..depth {
-            current_zero = Self::hash_and_mask(&[current_zero.clone(), current_zero.clone()], &mask);
-            zeros.push(current_zero.clone());
-        }
-
-        // Initial root is zeros[depth] (empty tree root)
-        let initial_root = zeros[depth].clone();
+        // Initial root is 0 (matching Cairo contract: initial_root = 0)
+        let initial_root = BigUint::from(0u8);
 
         Self {
             depth,
@@ -89,20 +85,22 @@ impl MerkleTree {
             let (left, right) = if current_idx % 2 == 0 {
                 // Current node is left child
                 let right_idx = current_idx + 1;
+                // CRITICAL: Use 0 for missing siblings (matching Cairo contract)
                 let right = self
                     .nodes
                     .get(&(level, right_idx))
                     .cloned()
-                    .unwrap_or_else(|| self.zeros[level].clone());
+                    .unwrap_or_else(|| BigUint::from(0u8)); // Use 0, not zeros[level]
                 (current_hash.clone(), right)
             } else {
                 // Current node is right child
                 let left_idx = current_idx - 1;
+                // CRITICAL: Use 0 for missing siblings (matching Cairo contract)
                 let left = self
                     .nodes
                     .get(&(level, left_idx))
                     .cloned()
-                    .unwrap_or_else(|| self.zeros[level].clone());
+                    .unwrap_or_else(|| BigUint::from(0u8)); // Use 0, not zeros[level]
                 (left, current_hash.clone())
             };
 
@@ -139,12 +137,13 @@ impl MerkleTree {
             // Path index: 0 if current is left (sibling on right), 1 if current is right (sibling on left)
             path_indices.push((current_idx % 2) as u32);
             
-            // Get sibling (use zero if not present)
+            // Get sibling (use 0 if not present - matching Cairo contract)
+            // CRITICAL: Cairo contract uses 0 for missing siblings, not recursive hash
             let sibling = self
                 .nodes
                 .get(&(level, sibling_idx))
                 .cloned()
-                .unwrap_or_else(|| self.zeros[level].clone());
+                .unwrap_or_else(|| BigUint::from(0u8)); // Use 0, not zeros[level]
             
             path.push(format!("0x{:x}", sibling));
             
@@ -221,8 +220,8 @@ mod tests {
     fn test_empty_tree() {
         let tree = MerkleTree::new(TREE_DEPTH);
         assert_eq!(tree.get_leaf_count(), 0);
-        // Empty tree root should be zeros[depth]
-        assert_eq!(tree.get_root(), tree.zeros[TREE_DEPTH]);
+        // Empty tree root should be 0 (matching Cairo contract)
+        assert_eq!(tree.get_root(), BigUint::from(0u8));
     }
 
     #[test]

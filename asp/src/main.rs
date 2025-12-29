@@ -63,7 +63,7 @@ async fn main() {
     let rpc_url = std::env::var("RPC_URL")
         .unwrap_or_else(|_| "https://api.cartridge.gg/x/starknet/sepolia".to_string());
     let contract_address = std::env::var("CONTRACT_ADDRESS").unwrap_or_else(|_| {
-        "0x07fd7386f3b91ec5e130aafb85da7fe3cbfa069beb080789150c4b75efc5c9ef".to_string()
+        "0x00cf52fa0d4f080faac7e780ae5b7298047c1626db180ad7bd628fa87860dfba".to_string()
     });
 
     // Validate ABIs on startup
@@ -141,6 +141,7 @@ async fn main() {
         .route("/api/initialize/prepare", post(prepare_initialize))
         // ZK Proof generation endpoints
         .route("/api/proof/swap", post(generate_swap_proof_endpoint))
+        .route("/api/proof/lp-mint", post(generate_lp_proof_endpoint))
         // Health check
         .route("/health", get(health_check))
         .layer(cors)
@@ -1043,6 +1044,125 @@ async fn generate_swap_proof_endpoint(
             Json(serde_json::json!({
                 "full_proof_with_hints": swap_proof.proof,
                 "public_inputs": swap_proof.public_inputs,
+            })).into_response()
+        }
+        Err(e) => {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            println!("[ASP] ❌ ZK proof generation failed (elapsed: {:.2}s): {}", elapsed, e);
+            println!("[ASP] ========================================\n");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "error": format!("Proof generation failed: {}", e)
+            }))).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LpProofRequest {
+    // Public inputs
+    nullifier: String,
+    root: String,
+    tick_lower: String,
+    tick_upper: String,
+    liquidity: String,
+    new_commitment: String,
+    position_commitment: String,
+    // Private inputs
+    secret_in: String,
+    amount_in: String,
+    secret_out: String,
+    nullifier_out: String,
+    amount_out: String,
+    #[serde(rename = "pathElements")]
+    path_elements: Vec<String>,
+    #[serde(rename = "pathIndices")]
+    path_indices: Vec<u32>,
+}
+
+async fn generate_lp_proof_endpoint(
+    _state: State<AppState>,
+    payload: Json<LpProofRequest>,
+) -> impl IntoResponse {
+    println!("\n[ASP] ========================================");
+    println!("[ASP] 📥 POST /api/proof/lp-mint - ZK Proof generation request");
+    println!("[ASP] ========================================");
+    let start_time = std::time::Instant::now();
+    
+    // Merkle proof must be provided in request
+    if payload.path_elements.is_empty() || payload.path_indices.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "pathElements and pathIndices must be provided."
+        }))).into_response();
+    }
+    
+    if payload.root.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "root must be provided."
+        }))).into_response();
+    }
+    
+    let merkle_path = payload.path_elements.clone();
+    let merkle_path_indices = payload.path_indices.clone();
+    let root = payload.root.clone();
+    
+    println!("[ASP] ✅ Using Merkle proof from request");
+    println!("[ASP]    Root: {}", root);
+    println!("[ASP]    Path length: {}", merkle_path.len());
+    
+    // Get circuits path (relative to ASP directory, go up to project root)
+    let circuits_path = std::env::current_dir()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("circuits")
+        .to_str()
+        .unwrap()
+        .to_string();
+    
+    // Build input JSON directly from request payload
+    let input_json = serde_json::json!({
+        "nullifier": payload.nullifier,
+        "root": root,
+        "tick_lower": payload.tick_lower,
+        "tick_upper": payload.tick_upper,
+        "liquidity": payload.liquidity,
+        "new_commitment": payload.new_commitment,
+        "position_commitment": payload.position_commitment,
+        "secret_in": payload.secret_in,
+        "amount_in": payload.amount_in,
+        "secret_out": payload.secret_out,
+        "nullifier_out": payload.nullifier_out,
+        "amount_out": payload.amount_out,
+        "pathElements": merkle_path,
+        "pathIndices": merkle_path_indices.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+    });
+    
+    println!("[ASP] 🔧 Generating ZK proof with rapidsnark...");
+    println!("[ASP]    Circuits path: {}", circuits_path);
+    
+    // Generate proof using rapidsnark
+    match proof::generate_lp_proof(&circuits_path, input_json).await {
+        Ok(lp_proof) => {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            println!("[ASP] ✅ ZK proof generated successfully in {:.2}s", elapsed);
+            println!("[ASP]    Proof length: {}, Public inputs: {}", 
+                lp_proof.proof.len(), lp_proof.public_inputs.len());
+            
+            // Log the actual values being returned
+            println!("[ASP] 📋 Returning proof with {} elements:", lp_proof.proof.len());
+            for (i, val) in lp_proof.proof.iter().enumerate() {
+                println!("[ASP]    proof[{}]: {}", i, val);
+            }
+            println!("[ASP] 📋 Returning public_inputs with {} elements:", lp_proof.public_inputs.len());
+            for (i, val) in lp_proof.public_inputs.iter().enumerate() {
+                println!("[ASP]    public_inputs[{}]: {}", i, val);
+            }
+            
+            println!("[ASP] ========================================\n");
+            
+            Json(serde_json::json!({
+                "full_proof_with_hints": lp_proof.proof,
+                "public_inputs": lp_proof.public_inputs,
             })).into_response()
         }
         Err(e) => {
