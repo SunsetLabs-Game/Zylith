@@ -13,7 +13,7 @@ show-explorer-links = false
 [sncast.sepolia]
 url = "https://api.cartridge.gg/x/starknet/sepolia"
 accounts-file = "./accounts/sepolia.json"
-account = "account420"
+account = "test_sender_24383"
 wait-params = { timeout = 600, retry-interval = 10 }
 block-explorer = "StarkScan"
 show-explorer-links = true
@@ -25,7 +25,21 @@ accounts-file = "./accounts/devnet.json"
 account = "devnet_account"
 wait-params = { timeout = 300, retry-interval = 5 }
 
-[sncast.sepolia_new]
-account = "sepolia_account_new"
-accounts-file = "./accounts/devnet.json"
+# Sepolia testnet profile (Stable - OpenZeppelin)
+[sncast.sepolia_oz]
+# Usando RPC de Cartridge (más estable que Alchemy)
 url = "https://api.cartridge.gg/x/starknet/sepolia"
+accounts-file = "./accounts/sepolia.json"
+account = "test_sender_24383"
+wait-params = { timeout = 600, retry-interval = 10 }
+block-explorer = "StarkScan"
+show-explorer-links = true
+
+# Sepolia testnet profile (User Argent Account)
+[sncast.sepolia_user]
+url = "https://api.cartridge.gg/x/starknet/sepolia"
+accounts-file = "./accounts/sepolia.json"
+account = "account420"
+wait-params = { timeout = 600, retry-interval = 10 }
+block-explorer = "StarkScan"
+show-explorer-links = true
